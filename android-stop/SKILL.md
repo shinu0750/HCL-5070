@@ -12,13 +12,13 @@ description: >-
 ### Step 1：關閉模擬器
 
 ```bash
-/Users/shuhsing/Library/Android/sdk/platform-tools/adb -s emulator-5554 shell reboot -p
+/mnt/c/Users/EID/AppData/Local/Android/Sdk/platform-tools/adb.exe -s emulator-5554 shell reboot -p
 ```
 
 ### Step 2：確認模擬器已離線
 
 ```bash
-/Users/shuhsing/Library/Android/sdk/platform-tools/adb devices
+/mnt/c/Users/EID/AppData/Local/Android/Sdk/platform-tools/adb.exe devices
 ```
 
 回傳清單為空即代表關閉成功。
@@ -26,19 +26,13 @@ description: >-
 ### Step 3：關閉 Android Studio（若有開啟）
 
 ```bash
-osascript -e 'tell application "Android Studio" to quit'
+powershell.exe -Command "Stop-Process -Name 'studio64' -Force -ErrorAction SilentlyContinue"
 ```
 
-若回傳錯誤（使用者取消 / 已關閉），改用：
+若要確認是否還有 process：
 
 ```bash
-pgrep -f "studio" | head -5
-```
-
-確認是否還有 process，有的話：
-
-```bash
-pkill -f "Android Studio"
+powershell.exe -Command "Get-Process -Name 'studio64' -ErrorAction SilentlyContinue | Select-Object Name, Id"
 ```
 
 ## 結果呈現
@@ -50,4 +44,5 @@ pkill -f "Android Studio"
 
 ## Changelog
 
+- 2.0.0 (2026-06-21): 移植至 Windows/WSL — 路徑改為 WSL `/mnt/c/Users/EID/AppData/Local/Android/Sdk/`；`osascript`/`pkill` 改為 `powershell.exe Stop-Process`
 - 1.0.0 (2026-06-04): 初始版本
