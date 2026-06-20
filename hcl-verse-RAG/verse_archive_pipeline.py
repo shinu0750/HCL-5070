@@ -12,7 +12,7 @@ HCL Verse 歸檔 pipeline
     --no-move     只做 EML+RAG，不移動信件（測試用，不會動到信箱）
     --headful     顯示瀏覽器視窗（除錯用；預設 headless）
 """
-import os, sys, re, json, hashlib, warnings, urllib.parse
+import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse
 from datetime import datetime, timedelta
 import requests
 from email.message import EmailMessage
@@ -76,7 +76,7 @@ SOURCE_FOLDER = "04Done"
 TARGET_FOLDER = "domdom"
 COLLECTION    = "verse_emails"
 VECTOR_SIZE   = 1536
-OUTPUT_FILE   = "/tmp/verse_archive_pipeline_result.json"
+OUTPUT_FILE   = os.path.join(tempfile.gettempdir(), "verse_archive_pipeline_result.json")
 
 # ── 參數解析 ─────────────────────────────────────────────────────────────────
 _args     = [a for a in sys.argv[1:] if not a.startswith("--")]

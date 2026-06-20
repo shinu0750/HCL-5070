@@ -14,7 +14,7 @@ Verse EML → Gmail 上傳（參數化版，供 hcl-verse-RAG pipeline 串接）
     --done     = ~/Documents/eml to gamil/eml_done
     憑證/token = ~/Documents/eml to gamil/{credentials,token}.json
 """
-import os, sys, base64, time, json, shutil, re, argparse
+import os, tempfile, sys, base64, time, json, shutil, re, argparse
 from pathlib import Path
 from datetime import datetime
 
@@ -29,7 +29,7 @@ GMAIL_DIR        = "/Users/shuhsing/Documents/eml to gamil"
 CREDENTIALS_FILE = os.path.join(GMAIL_DIR, "credentials.json")
 TOKEN_FILE       = os.path.join(GMAIL_DIR, "token.json")
 SCOPES           = ['https://www.googleapis.com/auth/gmail.modify']
-OUTPUT_FILE      = "/tmp/verse_upload_gmail_result.json"
+OUTPUT_FILE      = os.path.join(tempfile.gettempdir(), "verse_upload_gmail_result.json")
 BATCH_SIZE       = 50
 DELAY_SECONDS    = 1
 

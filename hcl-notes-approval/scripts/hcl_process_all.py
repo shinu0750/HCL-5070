@@ -8,7 +8,7 @@ HCL Notes 簽核自動化 — 完整流程（Android 版）
 """
 
 # ── 環境變數載入 ─────────────────────────────────────────────────────────────
-import os, json, re, subprocess, sys, time
+import os, tempfile, json, re, subprocess, sys, time
 
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
@@ -473,7 +473,7 @@ def main():
         # 收件匣沒有新信件，但 Unsigned 可能有前次未完成的遺留信件（改善 #1）
         print("\n收件匣沒有新的簽核信件，檢查 Unsigned 是否有遺留信件...", flush=True)
 
-    with open("/tmp/hcl_scan_results.json", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), "hcl_scan_results.json"), "w") as f:
         json.dump({"pending": pending_items}, f, ensure_ascii=False, indent=2)
 
     # Phase 2：Android 核准
@@ -487,7 +487,7 @@ def main():
         print("\n收件匣與 Unsigned 都沒有待處理的簽核信件。")
         return
 
-    with open("/tmp/hcl_approve_results.json", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), "hcl_approve_results.json"), "w") as f:
         json.dump({"total": len(approve_results), "results": approve_results},
                   f, ensure_ascii=False, indent=2)
 
@@ -516,7 +516,7 @@ def main():
         "approve":     approve_results,
         "move":        move_results,
     }
-    with open("/tmp/hcl_process_results.json", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), "hcl_process_results.json"), "w") as f:
         json.dump(final, f, ensure_ascii=False, indent=2)
 
     print("\n✅ 全部完成！", flush=True)

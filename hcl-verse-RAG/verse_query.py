@@ -15,7 +15,7 @@ HCL Verse 查詢腳本
   python3 verse_query.py --search "8D 報告" --top 5
   python3 verse_query.py --reflect "V3F 洩漏事件後來怎樣了"
 """
-import os, sys, json, argparse, requests
+import os, tempfile, sys, json, argparse, requests
 from pathlib import Path
 
 _env = os.path.expanduser("~/.hermes/.env")
@@ -38,7 +38,7 @@ HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://localhost:8888/mcp/")
 QDRANT_URL    = os.environ.get("QDRANT_URL",    "http://localhost:6333")
 OPENAI_KEY    = os.environ.get("OPENAI_API_KEY", "")
 COLLECTION    = "verse_emails"
-OUTPUT_FILE   = "/tmp/verse_query_result.json"
+OUTPUT_FILE   = os.path.join(tempfile.gettempdir(), "verse_query_result.json")
 
 # 專案名稱 → mental model id 的查表（啟動時從 Hindsight 抓）
 _model_map: dict[str, str] = {}

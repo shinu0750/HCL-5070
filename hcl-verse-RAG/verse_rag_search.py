@@ -3,7 +3,7 @@
 HCL Verse RAG 語意搜尋腳本
 用法：python3 verse_rag_search.py "查詢文字" [top_k]
 """
-import os, sys, json
+import os, tempfile, sys, json
 
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
@@ -20,7 +20,7 @@ from openai import OpenAI
 QDRANT_URL  = os.environ.get("QDRANT_URL",     "http://localhost:6333")
 OPENAI_KEY  = os.environ.get("OPENAI_API_KEY", "")
 COLLECTION  = "verse_emails"
-OUTPUT_FILE = "/tmp/verse_rag_search_result.json"
+OUTPUT_FILE = os.path.join(tempfile.gettempdir(), "verse_rag_search_result.json")
 
 qdrant        = QdrantClient(url=QDRANT_URL)
 openai_client = OpenAI(api_key=OPENAI_KEY)

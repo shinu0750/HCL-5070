@@ -291,7 +291,7 @@ def main():
     print(f"\n完成：{moved} 封已移動，{errors} 封失敗")
 
     output = {"total": len(mails), "moved": moved, "results": results}
-    with open("/tmp/hcl_move_construction.json", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), "hcl_move_construction.json"), "w") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
 

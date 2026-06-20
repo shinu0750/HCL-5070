@@ -23,7 +23,7 @@ USERNAME   = os.environ.get("HCL_USERNAME",    "shuhsing")
 PASSWORD   = os.environ.get("HCL_PASSWORD",    "")
 KEYWORD    = "訪客入廠申請"
 SIGN_FOLDER = "Sign"
-OUTPUT     = "/tmp/hcl_admission.json"
+OUTPUT     = os.path.join(tempfile.gettempdir(), "hcl_admission.json")
 MAX_MAILS  = 20  # 安全上限
 
 
