@@ -24,7 +24,7 @@ PASSWORD   = os.environ.get("HCL_PASSWORD",    "")
 
 def main():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False, channel=msedge)
+        browser = p.chromium.launch(headless=False, channel="msedge")
         ctx = browser.new_context(viewport={"width": 1280, "height": 900}, ignore_https_errors=True)
         page = ctx.new_page()
         page.set_default_timeout(60000)
