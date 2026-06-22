@@ -14,7 +14,7 @@ Nomad 按鈕動態取座標說明：
   - 只有 1 個按鈕 → 已核准（只剩離開）；有 3 個 → 待核准
 """
 
-import base64, glob, json, os, re, subprocess, sys, time
+import base64, glob, json, os, re, subprocess, sys, tempfile, time
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
@@ -120,9 +120,11 @@ KEYCODE_BACK = 4
 def adb(*args, timeout=30):
     result = subprocess.run(
         [ADB_PATH, "-s", SERIAL, *args],
-        capture_output=True, text=True, timeout=timeout
+        capture_output=True, text=True,
+        encoding='utf-8', errors='replace',
+        timeout=timeout
     )
-    return result.stdout.strip()
+    return (result.stdout or "").strip()
 
 
 def tap(x, y, delay=1.5):
@@ -609,10 +611,24 @@ def navigate_to_unsigned(_depth=0):
         press_back(delay=2)
         return navigate_to_unsigned(_depth + 1)
 
-    # 如果在 Folders 資料夾列表頁 → 直接點 Unsigned 資料夾（動態 bounds）
-    if 'text="Folders"' in xml and 'text="Unsigned"' in xml:
-        print("  在 Folders 列表，點 Unsigned 資料夾...", flush=True)
-        _tap_text(xml, "Unsigned", delay=2)
+    # 如果在 Folders 資料夾列表頁 → 點 Unsigned（若不在畫面內先往下捲找）
+    if 'text="Folders"' in xml:
+        if 'text="Unsigned"' in xml:
+            print("  在 Folders 列表，點 Unsigned 資料夾...", flush=True)
+            _tap_text(xml, "Unsigned", delay=2)
+            return navigate_to_unsigned(_depth + 1)
+        # Unsigned 在捲動區域外，往下捲最多 3 次再找
+        print("  在 Folders 列表，Unsigned 不在畫面內，往下捲找...", flush=True)
+        for _ in range(3):
+            adb("shell", "input", "swipe", "1200", "800", "1200", "300", "500")
+            time.sleep(1)
+            xml2 = dump_ui()
+            if 'text="Unsigned"' in xml2:
+                _tap_text(xml2, "Unsigned", delay=2)
+                return navigate_to_unsigned(_depth + 1)
+        # 捲完還找不到，fallback 固定座標（前次已在捲底，Unsigned 約在 y=578）
+        print("  警告：捲完仍找不到 Unsigned，使用固定座標 (1336, 578)...", flush=True)
+        tap(1336, 578, delay=2)
         return navigate_to_unsigned(_depth + 1)
 
     # 如果在 Verse 主畫面 → 點 Mail
@@ -621,14 +637,13 @@ def navigate_to_unsigned(_depth=0):
         tap(*COORD["main_mail"], delay=2)
         xml = dump_ui()
 
-    # 開漢堡選單 → Folders → Unsigned（後兩步動態定位，fallback 固定座標）
-    if 'text="Inbox"' in xml or 'text="Folders"' in xml or 'id/toolbar' in xml:
+    # 開漢堡選單 → Folders → Unsigned（後兩步動態定位）
+    if 'text="Inbox"' in xml or 'id/toolbar' in xml:
         print("  開選單 → Folders → Unsigned...", flush=True)
         tap(*COORD["hamburger"], delay=1)
         time.sleep(0.5)
         _tap_text(dump_ui(), "Folders", fallback=COORD["menu_folders"], delay=1.5)
         time.sleep(0.5)
-        _tap_text(dump_ui(), "Unsigned", fallback=COORD["folder_unsigned"], delay=2)
         return navigate_to_unsigned(_depth + 1)
 
     # 可能正在畫面轉場，先等 2 秒重新判斷，連續失敗才重啟
