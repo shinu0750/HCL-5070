@@ -1,0 +1,7 @@
+.claude/settings.local.json
+*.bak
+*.bak2
+*.pre_final
+__pycache__/
+*.pyc
+contacts_external.json
