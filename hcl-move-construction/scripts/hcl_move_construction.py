@@ -2,7 +2,9 @@
 """
 掃收件匣找出符合關鍵字的信件（含討論串），逐一移到「05Other」資料匣。
 """
-import json, os
+import json, os, sys, tempfile
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
