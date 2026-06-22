@@ -559,6 +559,7 @@ def _in_unsigned_list(xml=None):
         xml = dump_ui()
     return ('text="Unsigned"' in xml
             and 'text="Folders"' not in xml
+            and 'text="Subscribe"' not in xml
             and ('id/toolbar' in xml or 'content-desc="More options"' in xml))
 
 
@@ -588,7 +589,7 @@ def ensure_clean_state():
 
 def navigate_to_unsigned(_depth=0):
     """從 Verse 主畫面或任何畫面導航到 Unsigned 資料夾（資料夾項目動態定位）"""
-    if _depth > 4:
+    if _depth > 7:
         print("  警告：導航到 Unsigned 失敗（重試超過上限）", flush=True)
         return False
 
@@ -598,6 +599,12 @@ def navigate_to_unsigned(_depth=0):
     if _in_unsigned_list(xml):
         print("  已在 Unsigned 資料夾", flush=True)
         return True
+
+    # 如果在 Unsigned Subscribe 頁（資料夾尚未訂閱）→ 點 Subscribe 並等待 sync
+    if 'text="Unsigned"' in xml and 'text="Subscribe"' in xml:
+        print("  Unsigned 尚未訂閱，點 Subscribe...", flush=True)
+        _tap_text(xml, "Subscribe", delay=10)
+        return navigate_to_unsigned(_depth + 1)
 
     # 如果還停在 Nomad app（表單核准/離開後常見）→ 直接切回 Verse
     if 'package="com.lotus.nomad"' in xml:
