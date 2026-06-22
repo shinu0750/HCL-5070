@@ -9,6 +9,8 @@ HCL Notes 簽核自動化 — 完整流程（Android 版）
 
 # ── 環境變數載入 ─────────────────────────────────────────────────────────────
 import os, tempfile, json, re, subprocess, sys, time
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):

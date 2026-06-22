@@ -15,6 +15,8 @@ Nomad 按鈕動態取座標說明：
 """
 
 import base64, glob, json, os, re, subprocess, sys, time
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # 載入 .env
 _env_path = os.path.expanduser("~/.hermes/.env")
