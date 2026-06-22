@@ -29,7 +29,10 @@ if os.path.exists(_env_path):
                 os.environ.setdefault(_k.strip(), _v.strip())
 
 SERIAL       = "emulator-5554"
-ADB_PATH     = "/Users/shuhsing/Library/Android/sdk/platform-tools/adb"
+_adb_win = r"C:\Users\EID\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+_adb_mac = "/Users/shuhsing/Library/Android/sdk/platform-tools/adb"
+ADB_PATH     = _adb_win if os.path.exists(_adb_win) else _adb_mac
+_TMP         = tempfile.gettempdir()
 NOTES_PASSWORD = os.environ.get("HCL_NOTES_PASSWORD", "")
 
 # ── 固定座標（橫向 2400×1080）──────────────────────────────────────────────────
@@ -146,7 +149,9 @@ def screenshot_b64():
     return base64.b64encode(raw).decode()
 
 
-def screenshot_to_file(path="/tmp/nomad_form.png"):
+def screenshot_to_file(path=None):
+    if path is None:
+        path = os.path.join(_TMP, "nomad_form.png")
     """截圖存到本機檔案"""
     adb("shell", "screencap", "-p", "/sdcard/screen.png")
     subprocess.run([ADB_PATH, "-s", SERIAL, "pull", "/sdcard/screen.png", path],
@@ -259,7 +264,7 @@ def capture_full_form(count, required_fields=None):
     load_start = time.time()
     prev_load_hash = None
     while time.time() - load_start < load_timeout:
-        tmp_path = "/tmp/nomad_load_check.png"
+        tmp_path = os.path.join(_TMP, "nomad_load_check.png")
         screenshot_to_file(tmp_path)
         load_hash = content_hash(tmp_path)
         if load_hash == prev_load_hash:
@@ -279,8 +284,9 @@ def capture_full_form(count, required_fields=None):
     for _ in range(12):  # 上限 12 次，足夠捲完最長表單
         adb("shell", "input", "swipe", "1200", "330", "1200", "630", "300")
         time.sleep(0.5)
-        screenshot_to_file("/tmp/nomad_top_check.png")
-        top_hash = content_hash("/tmp/nomad_top_check.png")
+        _top_check = os.path.join(_TMP, "nomad_top_check.png")
+        screenshot_to_file(_top_check)
+        top_hash = content_hash(_top_check)
         if top_hash == prev_top_hash:
             break  # 捲動後畫面未變 = 已到頂
         prev_top_hash = top_hash
@@ -309,7 +315,7 @@ def capture_full_form(count, required_fields=None):
     accumulated_text = ""  # v1.3.1：累積所有截圖的 OCR 文字，用於欄位涵蓋率驗證
 
     for i in range(8):  # 最多 8 頁
-        path = f"/tmp/nomad_form_{count}_{chr(ord('a') + i)}.png"
+        path = os.path.join(_TMP, f"nomad_form_{count}_{chr(ord('a') + i)}.png")
         screenshot_to_file(path)
 
         current_hash = content_hash(path)
@@ -383,7 +389,7 @@ def capture_full_form(count, required_fields=None):
 
     if not paths:
         # 保險：至少回傳一張
-        path = f"/tmp/nomad_form_{count}_a.png"
+        path = os.path.join(_TMP, f"nomad_form_{count}_a.png")
         screenshot_to_file(path)
         paths = [path]
 
@@ -404,7 +410,7 @@ def wait_for_ui(pattern, timeout=8, interval=1.0):
 def clear_stale_screenshots():
     """清除上次執行遺留的表單截圖，避免 Phase 4 OCR 讀到舊圖（改善 #7）
     涵蓋新格式：nomad_form_{N}_{a-h}.png（改善 #9 逐頁截圖）"""
-    stale = glob.glob("/tmp/nomad_form_*.png")
+    stale = glob.glob(os.path.join(_TMP, "nomad_form_*.png"))
     for f in stale:
         try:
             os.remove(f)
@@ -821,8 +827,8 @@ def open_nomad_form(email_cx, email_cy):
 
 
 def read_form_via_screenshot():
-    """截圖存到 /tmp/nomad_form.png，供 AI OCR 讀取表單內容。回傳截圖路徑。"""
-    path = screenshot_to_file("/tmp/nomad_form.png")
+    """截圖存到 temp/nomad_form.png，供 AI OCR 讀取表單內容。回傳截圖路徑。"""
+    path = screenshot_to_file(os.path.join(_TMP, "nomad_form.png"))
     print(f"    截圖已儲存：{path}", flush=True)
     return path
 
@@ -1071,13 +1077,14 @@ if __name__ == "__main__":
     review_only = "--review" in sys.argv
 
     pending = []
-    if os.path.exists("/tmp/hcl_scan_results.json"):
-        with open("/tmp/hcl_scan_results.json") as f:
+    _scan_json = os.path.join(_TMP, "hcl_scan_results.json")
+    if os.path.exists(_scan_json):
+        with open(_scan_json) as f:
             pending = json.load(f).get("pending", [])
 
     results = phase2_approve_android(pending, check_leftover=not pending,
                                      review_only=review_only)
     output = {"total": len(results), "results": results}
-    with open("/tmp/hcl_approve_results.json", "w") as f:
+    with open(os.path.join(_TMP, "hcl_approve_results.json"), "w") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(json.dumps(output, ensure_ascii=False, indent=2))
