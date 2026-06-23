@@ -823,29 +823,74 @@ def _try_open_link_text(timeout=6):
     return False
 
 
+def _open_nomad_from_chrome_url():
+    """
+    若 Chrome 被開啟（Link 點擊後 https:// 被 Chrome 攔截），
+    從 Chrome address bar 取 URL → 換成 notes:// scheme → am start 開 Nomad。
+    回傳 True 若成功進入 Nomad。
+    """
+    xml = dump_ui()
+    # Chrome address bar 的 URL 會出現在 text 節點
+    portal_domain = os.environ.get("HCL_PORTAL_HOST", "portal.ecic.com.tw")
+    url_match = None
+    for m in re.finditer(r'text="([^"]*' + re.escape(portal_domain) + r'[^"]*)"', xml):
+        url_match = m.group(1)
+        break
+    if not url_match:
+        print("    ⚠️ Chrome 未找到 portal URL", flush=True)
+        return False
+
+    # 轉換 notes:// scheme
+    https_url = url_match if url_match.startswith("http") else "https://" + url_match
+    notes_url = re.sub(r'^https?://', 'notes://', https_url)
+    print(f"    [notes intent] {notes_url[:80]}...", flush=True)
+
+    # 關閉 Chrome，回到 Verse
+    adb("shell", "input", "keyevent", "4")
+    time.sleep(1)
+
+    # 用 am start 直接開 Nomad
+    adb("shell", "am", "start",
+        "-a", "android.intent.action.VIEW",
+        "-d", notes_url,
+        "-n", "com.lotus.nomad/com.lotus.noteslib.core.MainActivity")
+    time.sleep(6)
+    pkg = _current_foreground_pkg()
+    return "nomad" in pkg.lower()
+
+
 def open_nomad_form(email_cx, email_cy):
     """點開信件 → 點附件圖示開啟 Nomad → 每次都確認密碼對話框
 
-    v1.3 新增：開啟 Nomad 後驗證前景 app 確實是 com.lotus.nomad，
-    若仍停在 Verse（純通知信點 📄 emoji 沒生效），改點 "Link" 文字節點。
+    v1.4 新增：若 Link 點擊後 Chrome 被開啟（https:// URL），
+    自動從 Chrome address bar 抓 URL → 轉換 notes:// → am start 開 Nomad。
     """
     print(f"    點開信件 ({email_cx}, {email_cy})", flush=True)
     tap(email_cx, email_cy, delay=2.5)
     print(f"    點附件圖示 {COORD['attach_icon']}", flush=True)
     tap(*COORD["attach_icon"], delay=5)
-    handle_notes_password_dialog()  # 每次都檢查，有才處理
+    handle_notes_password_dialog()
 
-    # 驗證 Nomad 確實開啟（v1.3：避免通知信只截到 Verse email view）
     pkg = _current_foreground_pkg()
-    if "nomad" not in pkg.lower():
-        print(f"    ⚠️ Nomad 未開啟（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
-        if _try_open_link_text():
-            handle_notes_password_dialog()
-            pkg = _current_foreground_pkg()
-            if "nomad" not in pkg.lower():
-                print(f"    ⚠️ Link 點擊後仍未進入 Nomad（前景：{pkg}）", flush=True)
-        else:
-            print("    ⚠️ 找不到 Link 文字節點，將截到 Verse email view", flush=True)
+    if "nomad" in pkg.lower():
+        return  # 已在 Nomad，完成
+
+    print(f"    ⚠️ Nomad 未開啟（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
+    if _try_open_link_text():
+        handle_notes_password_dialog()
+        pkg = _current_foreground_pkg()
+        if "nomad" in pkg.lower():
+            return  # 點 Link 後進入 Nomad
+
+        # Link 點了但 Chrome 開了 → 用 notes:// intent
+        if "chrome" in pkg.lower():
+            print("    Chrome 攔截了連結，改用 notes:// intent 開 Nomad...", flush=True)
+            if _open_nomad_from_chrome_url():
+                handle_notes_password_dialog()
+                return
+        print(f"    ⚠️ Link 點擊後仍未進入 Nomad（前景：{pkg}）", flush=True)
+    else:
+        print("    ⚠️ 找不到 Link 文字節點，將截到 Verse email view", flush=True)
 
 
 def read_form_via_screenshot():
