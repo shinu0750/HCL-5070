@@ -23,9 +23,9 @@ USERNAME      = os.environ.get("HCL_USERNAME",    "shuhsing")
 PASSWORD      = os.environ.get("HCL_PASSWORD",    "")
 TARGET_FOLDER = "05Other"
 SIGN_FOLDER   = "Sign"
-KEYWORD_FOLDER_MAP = {"撌脤撱": SIGN_FOLDER, "撌脣撱": SIGN_FOLDER}
-KEYWORDS      = ["?亙??賢極", "SCI 摰瘞??璅", "皞嗅??∟頃?", "??賢極?桃隢歇?詨", "?怨郎霅血", "?餅０摰炎", "撌脤撱", "撌脣撱", "隢??祇勗????臬?????亙極蝔"]
-DATE_LABELS   = {"撖辣?", "銝餅", "閮??", "隞予", "?典予", "?祇", "銝", "?湔", "?祆?"}
+KEYWORD_FOLDER_MAP = {"簽核通知": SIGN_FOLDER, "請核示": SIGN_FOLDER}
+KEYWORDS      = ["入廠施工", "SCI 安全氣候指標", "溶劑採購通知", "假日施工單申請已核可", "請問本週假日", "簽核通知", "請核示"]
+DATE_LABELS   = {"今天", "昨天", "本週", "上週", "本月", "上個月", "更早", "今年", "去年"}
 
 
 def login(page):
@@ -294,7 +294,7 @@ def main():
 
     output = {"total": len(mails), "moved": moved, "results": results}
     out_path = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "hcl_move_construction.json")
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
 
