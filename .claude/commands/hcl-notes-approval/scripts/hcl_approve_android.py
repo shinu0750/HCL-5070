@@ -14,7 +14,9 @@ Nomad 按鈕動態取座標說明：
   - 只有 1 個按鈕 → 已核准（只剩離開）；有 3 個 → 待核准
 """
 
-import base64, glob, json, os, re, subprocess, sys, time
+import base64, glob, json, os, re, subprocess, sys, tempfile, time
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # 載入 .env
 _env_path = os.path.expanduser("~/.hermes/.env")
@@ -27,8 +29,15 @@ if os.path.exists(_env_path):
                 os.environ.setdefault(_k.strip(), _v.strip())
 
 SERIAL       = "emulator-5554"
-ADB_PATH     = "/Users/shuhsing/Library/Android/sdk/platform-tools/adb"
+_adb_win = r"C:\Users\EID\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+_adb_mac = "/Users/shuhsing/Library/Android/sdk/platform-tools/adb"
+ADB_PATH     = _adb_win if os.path.exists(_adb_win) else _adb_mac
+_TMP         = tempfile.gettempdir()
 NOTES_PASSWORD = os.environ.get("HCL_NOTES_PASSWORD", "")
+
+class PasswordError(RuntimeError):
+    """HCL Notes ID 密碼錯誤或未設定時拋出。"""
+    pass
 
 # ── 固定座標（橫向 2400×1080）──────────────────────────────────────────────────
 COORD = {
@@ -115,9 +124,11 @@ KEYCODE_BACK = 4
 def adb(*args, timeout=30):
     result = subprocess.run(
         [ADB_PATH, "-s", SERIAL, *args],
-        capture_output=True, text=True, timeout=timeout
+        capture_output=True, text=True,
+        encoding='utf-8', errors='replace',
+        timeout=timeout
     )
-    return result.stdout.strip()
+    return (result.stdout or "").strip()
 
 
 def tap(x, y, delay=1.5):
@@ -144,7 +155,9 @@ def screenshot_b64():
     return base64.b64encode(raw).decode()
 
 
-def screenshot_to_file(path="/tmp/nomad_form.png"):
+def screenshot_to_file(path=None):
+    if path is None:
+        path = os.path.join(_TMP, "nomad_form.png")
     """截圖存到本機檔案"""
     adb("shell", "screencap", "-p", "/sdcard/screen.png")
     subprocess.run([ADB_PATH, "-s", SERIAL, "pull", "/sdcard/screen.png", path],
@@ -257,7 +270,7 @@ def capture_full_form(count, required_fields=None):
     load_start = time.time()
     prev_load_hash = None
     while time.time() - load_start < load_timeout:
-        tmp_path = "/tmp/nomad_load_check.png"
+        tmp_path = os.path.join(_TMP, "nomad_load_check.png")
         screenshot_to_file(tmp_path)
         load_hash = content_hash(tmp_path)
         if load_hash == prev_load_hash:
@@ -277,8 +290,9 @@ def capture_full_form(count, required_fields=None):
     for _ in range(12):  # 上限 12 次，足夠捲完最長表單
         adb("shell", "input", "swipe", "1200", "330", "1200", "630", "300")
         time.sleep(0.5)
-        screenshot_to_file("/tmp/nomad_top_check.png")
-        top_hash = content_hash("/tmp/nomad_top_check.png")
+        _top_check = os.path.join(_TMP, "nomad_top_check.png")
+        screenshot_to_file(_top_check)
+        top_hash = content_hash(_top_check)
         if top_hash == prev_top_hash:
             break  # 捲動後畫面未變 = 已到頂
         prev_top_hash = top_hash
@@ -307,7 +321,7 @@ def capture_full_form(count, required_fields=None):
     accumulated_text = ""  # v1.3.1：累積所有截圖的 OCR 文字，用於欄位涵蓋率驗證
 
     for i in range(8):  # 最多 8 頁
-        path = f"/tmp/nomad_form_{count}_{chr(ord('a') + i)}.png"
+        path = os.path.join(_TMP, f"nomad_form_{count}_{chr(ord('a') + i)}.png")
         screenshot_to_file(path)
 
         current_hash = content_hash(path)
@@ -381,7 +395,7 @@ def capture_full_form(count, required_fields=None):
 
     if not paths:
         # 保險：至少回傳一張
-        path = f"/tmp/nomad_form_{count}_a.png"
+        path = os.path.join(_TMP, f"nomad_form_{count}_a.png")
         screenshot_to_file(path)
         paths = [path]
 
@@ -402,7 +416,7 @@ def wait_for_ui(pattern, timeout=8, interval=1.0):
 def clear_stale_screenshots():
     """清除上次執行遺留的表單截圖，避免 Phase 4 OCR 讀到舊圖（改善 #7）
     涵蓋新格式：nomad_form_{N}_{a-h}.png（改善 #9 逐頁截圖）"""
-    stale = glob.glob("/tmp/nomad_form_*.png")
+    stale = glob.glob(os.path.join(_TMP, "nomad_form_*.png"))
     for f in stale:
         try:
             os.remove(f)
@@ -549,6 +563,7 @@ def _in_unsigned_list(xml=None):
         xml = dump_ui()
     return ('text="Unsigned"' in xml
             and 'text="Folders"' not in xml
+            and 'text="Subscribe"' not in xml
             and ('id/toolbar' in xml or 'content-desc="More options"' in xml))
 
 
@@ -578,7 +593,7 @@ def ensure_clean_state():
 
 def navigate_to_unsigned(_depth=0):
     """從 Verse 主畫面或任何畫面導航到 Unsigned 資料夾（資料夾項目動態定位）"""
-    if _depth > 4:
+    if _depth > 7:
         print("  警告：導航到 Unsigned 失敗（重試超過上限）", flush=True)
         return False
 
@@ -588,6 +603,12 @@ def navigate_to_unsigned(_depth=0):
     if _in_unsigned_list(xml):
         print("  已在 Unsigned 資料夾", flush=True)
         return True
+
+    # 如果在 Unsigned Subscribe 頁（資料夾尚未訂閱）→ 點 Subscribe 並等待 sync
+    if 'text="Unsigned"' in xml and 'text="Subscribe"' in xml:
+        print("  Unsigned 尚未訂閱，點 Subscribe...", flush=True)
+        _tap_text(xml, "Subscribe", delay=10)
+        return navigate_to_unsigned(_depth + 1)
 
     # 如果還停在 Nomad app（表單核准/離開後常見）→ 直接切回 Verse
     if 'package="com.lotus.nomad"' in xml:
@@ -601,10 +622,24 @@ def navigate_to_unsigned(_depth=0):
         press_back(delay=2)
         return navigate_to_unsigned(_depth + 1)
 
-    # 如果在 Folders 資料夾列表頁 → 直接點 Unsigned 資料夾（動態 bounds）
-    if 'text="Folders"' in xml and 'text="Unsigned"' in xml:
-        print("  在 Folders 列表，點 Unsigned 資料夾...", flush=True)
-        _tap_text(xml, "Unsigned", delay=2)
+    # 如果在 Folders 資料夾列表頁 → 點 Unsigned（若不在畫面內先往下捲找）
+    if 'text="Folders"' in xml:
+        if 'text="Unsigned"' in xml:
+            print("  在 Folders 列表，點 Unsigned 資料夾...", flush=True)
+            _tap_text(xml, "Unsigned", delay=2)
+            return navigate_to_unsigned(_depth + 1)
+        # Unsigned 在捲動區域外，往下捲最多 3 次再找
+        print("  在 Folders 列表，Unsigned 不在畫面內，往下捲找...", flush=True)
+        for _ in range(3):
+            adb("shell", "input", "swipe", "1200", "800", "1200", "300", "500")
+            time.sleep(1)
+            xml2 = dump_ui()
+            if 'text="Unsigned"' in xml2:
+                _tap_text(xml2, "Unsigned", delay=2)
+                return navigate_to_unsigned(_depth + 1)
+        # 捲完還找不到，fallback 固定座標（前次已在捲底，Unsigned 約在 y=578）
+        print("  警告：捲完仍找不到 Unsigned，使用固定座標 (1336, 578)...", flush=True)
+        tap(1336, 578, delay=2)
         return navigate_to_unsigned(_depth + 1)
 
     # 如果在 Verse 主畫面 → 點 Mail
@@ -613,14 +648,13 @@ def navigate_to_unsigned(_depth=0):
         tap(*COORD["main_mail"], delay=2)
         xml = dump_ui()
 
-    # 開漢堡選單 → Folders → Unsigned（後兩步動態定位，fallback 固定座標）
-    if 'text="Inbox"' in xml or 'text="Folders"' in xml or 'id/toolbar' in xml:
+    # 開漢堡選單 → Folders → Unsigned（後兩步動態定位）
+    if 'text="Inbox"' in xml or 'id/toolbar' in xml:
         print("  開選單 → Folders → Unsigned...", flush=True)
         tap(*COORD["hamburger"], delay=1)
         time.sleep(0.5)
         _tap_text(dump_ui(), "Folders", fallback=COORD["menu_folders"], delay=1.5)
         time.sleep(0.5)
-        _tap_text(dump_ui(), "Unsigned", fallback=COORD["folder_unsigned"], delay=2)
         return navigate_to_unsigned(_depth + 1)
 
     # 可能正在畫面轉場，先等 2 秒重新判斷，連續失敗才重啟
@@ -757,6 +791,13 @@ def handle_notes_password_dialog():
     adb("shell", "input", "keyevent", "66")
     print("    密碼已送出，等待 Nomad 載入...", flush=True)
     time.sleep(5)
+
+    # 驗證密碼是否被接受
+    xml_after = dump_ui()
+    if 'Wrong Password' in xml_after or 'wrong password' in xml_after.lower():
+        print("    ✗ Notes ID 密碼錯誤！請確認 ~/.hermes/.env 中 HCL_NOTES_PASSWORD", flush=True)
+        _tap_text(xml_after, "OK", delay=1)  # 關掉 Wrong Password 對話框
+        raise PasswordError("Notes ID 密碼錯誤，請確認 HCL_NOTES_PASSWORD 環境變數")
     return True
 
 
@@ -793,34 +834,79 @@ def _try_open_link_text(timeout=6):
     return False
 
 
+def _open_nomad_from_chrome_url():
+    """
+    若 Chrome 被開啟（Link 點擊後 https:// 被 Chrome 攔截），
+    從 Chrome address bar 取 URL → 換成 notes:// scheme → am start 開 Nomad。
+    回傳 True 若成功進入 Nomad。
+    """
+    xml = dump_ui()
+    # Chrome address bar 的 URL 會出現在 text 節點
+    portal_domain = os.environ.get("HCL_PORTAL_HOST", "portal.ecic.com.tw")
+    url_match = None
+    for m in re.finditer(r'text="([^"]*' + re.escape(portal_domain) + r'[^"]*)"', xml):
+        url_match = m.group(1)
+        break
+    if not url_match:
+        print("    ⚠️ Chrome 未找到 portal URL", flush=True)
+        return False
+
+    # 轉換 notes:// scheme
+    https_url = url_match if url_match.startswith("http") else "https://" + url_match
+    notes_url = re.sub(r'^https?://', 'notes://', https_url)
+    print(f"    [notes intent] {notes_url[:80]}...", flush=True)
+
+    # 關閉 Chrome，回到 Verse
+    adb("shell", "input", "keyevent", "4")
+    time.sleep(1)
+
+    # 用 am start 直接開 Nomad
+    adb("shell", "am", "start",
+        "-a", "android.intent.action.VIEW",
+        "-d", notes_url,
+        "-n", "com.lotus.nomad/com.lotus.noteslib.core.MainActivity")
+    time.sleep(6)
+    pkg = _current_foreground_pkg()
+    return "nomad" in pkg.lower()
+
+
 def open_nomad_form(email_cx, email_cy):
     """點開信件 → 點附件圖示開啟 Nomad → 每次都確認密碼對話框
 
-    v1.3 新增：開啟 Nomad 後驗證前景 app 確實是 com.lotus.nomad，
-    若仍停在 Verse（純通知信點 📄 emoji 沒生效），改點 "Link" 文字節點。
+    v1.4 新增：若 Link 點擊後 Chrome 被開啟（https:// URL），
+    自動從 Chrome address bar 抓 URL → 轉換 notes:// → am start 開 Nomad。
     """
     print(f"    點開信件 ({email_cx}, {email_cy})", flush=True)
     tap(email_cx, email_cy, delay=2.5)
     print(f"    點附件圖示 {COORD['attach_icon']}", flush=True)
     tap(*COORD["attach_icon"], delay=5)
-    handle_notes_password_dialog()  # 每次都檢查，有才處理
+    handle_notes_password_dialog()
 
-    # 驗證 Nomad 確實開啟（v1.3：避免通知信只截到 Verse email view）
     pkg = _current_foreground_pkg()
-    if "nomad" not in pkg.lower():
-        print(f"    ⚠️ Nomad 未開啟（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
-        if _try_open_link_text():
-            handle_notes_password_dialog()
-            pkg = _current_foreground_pkg()
-            if "nomad" not in pkg.lower():
-                print(f"    ⚠️ Link 點擊後仍未進入 Nomad（前景：{pkg}）", flush=True)
-        else:
-            print("    ⚠️ 找不到 Link 文字節點，將截到 Verse email view", flush=True)
+    if "nomad" in pkg.lower():
+        return  # 已在 Nomad，完成
+
+    print(f"    ⚠️ Nomad 未開啟（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
+    if _try_open_link_text():
+        handle_notes_password_dialog()
+        pkg = _current_foreground_pkg()
+        if "nomad" in pkg.lower():
+            return  # 點 Link 後進入 Nomad
+
+        # Link 點了但 Chrome 開了 → 用 notes:// intent
+        if "chrome" in pkg.lower():
+            print("    Chrome 攔截了連結，改用 notes:// intent 開 Nomad...", flush=True)
+            if _open_nomad_from_chrome_url():
+                handle_notes_password_dialog()
+                return
+        print(f"    ⚠️ Link 點擊後仍未進入 Nomad（前景：{pkg}）", flush=True)
+    else:
+        print("    ⚠️ 找不到 Link 文字節點，將截到 Verse email view", flush=True)
 
 
 def read_form_via_screenshot():
-    """截圖存到 /tmp/nomad_form.png，供 AI OCR 讀取表單內容。回傳截圖路徑。"""
-    path = screenshot_to_file("/tmp/nomad_form.png")
+    """截圖存到 temp/nomad_form.png，供 AI OCR 讀取表單內容。回傳截圖路徑。"""
+    path = screenshot_to_file(os.path.join(_TMP, "nomad_form.png"))
     print(f"    截圖已儲存：{path}", flush=True)
     return path
 
@@ -866,6 +952,12 @@ def do_approve(buttons):
     for attempt in range(3):
         n = _nomad_button_count()
         if n <= 1:
+            # n=0 可能是 Wrong Password 對話框擋住了按鈕，不能直接算通過
+            xml = dump_ui()
+            if 'Wrong Password' in xml or 'Notes ID Password' in xml or 'Notes ID password' in xml:
+                print("    ✗ 偵測到密碼相關對話框（n=0 不代表核准成功）", flush=True)
+                _tap_text(xml, "OK", delay=1)
+                raise PasswordError("核准時仍顯示密碼錯誤對話框")
             print(f"    核准驗證通過（按鈕列剩 {n} 個按鈕）", flush=True)
             return "approved"
         print(f"    [verify] 按鈕列仍有 {n} 個按鈕，等 2 秒再確認...", flush=True)
@@ -972,6 +1064,12 @@ def phase2_approve_android(pending_items, ai_judge_fn=None, check_leftover=False
     if review_only:
         print("  ⚠️ 審查模式：只截圖、不核准", flush=True)
 
+    # 前置檢查：密碼必須設定才能操作 Nomad
+    if not review_only and not NOTES_PASSWORD:
+        print("  ✗ HCL_NOTES_PASSWORD 未設定，無法執行核准", flush=True)
+        print("  請在 ~/.hermes/.env 加入一行：HCL_NOTES_PASSWORD=你的密碼", flush=True)
+        return []
+
     pending         = [x for x in pending_items if x.get("category") == "待簽核"]
     notifs          = [x for x in pending_items if x.get("category") == "通知"]
     approved_notifs = [x for x in pending_items if x.get("category") == "核准通知"]
@@ -1021,6 +1119,24 @@ def phase2_approve_android(pending_items, ai_judge_fn=None, check_leftover=False
             try:
                 status, screenshots = _process_one_email(
                     cx, cy, subject_text, count, review_only)
+            except PasswordError as e:
+                print(f"    ✗ 密碼錯誤，中止批次處理：{e}", flush=True)
+                status = "password_error"
+                results.append({
+                    "sender":      "",
+                    "subject":     subject_text,
+                    "status":      status,
+                    "screenshots": [],
+                    "screenshot":  None,
+                    "screenshot_b": None,
+                })
+                processed[subject_text] = processed.get(subject_text, 0) + 1
+                try:
+                    ensure_clean_state()
+                except Exception:
+                    pass
+                print("  密碼錯誤無法繼續，停止處理剩餘信件", flush=True)
+                break
             except Exception as e:
                 print(f"    ✗ 處理失敗：{e}", flush=True)
                 status = "error"
@@ -1069,13 +1185,14 @@ if __name__ == "__main__":
     review_only = "--review" in sys.argv
 
     pending = []
-    if os.path.exists("/tmp/hcl_scan_results.json"):
-        with open("/tmp/hcl_scan_results.json") as f:
+    _scan_json = os.path.join(_TMP, "hcl_scan_results.json")
+    if os.path.exists(_scan_json):
+        with open(_scan_json) as f:
             pending = json.load(f).get("pending", [])
 
     results = phase2_approve_android(pending, check_leftover=not pending,
                                      review_only=review_only)
     output = {"total": len(results), "results": results}
-    with open("/tmp/hcl_approve_results.json", "w") as f:
+    with open(os.path.join(_TMP, "hcl_approve_results.json"), "w") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
     print(json.dumps(output, ensure_ascii=False, indent=2))
