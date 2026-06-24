@@ -23,9 +23,9 @@ USERNAME      = os.environ.get("HCL_USERNAME",    "shuhsing")
 PASSWORD      = os.environ.get("HCL_PASSWORD",    "")
 TARGET_FOLDER = "05Other"
 SIGN_FOLDER   = "Sign"
-KEYWORD_FOLDER_MAP = {"簽核通知": SIGN_FOLDER, "請核示": SIGN_FOLDER}
-KEYWORDS      = ["入廠施工", "SCI 安全氣候指標", "溶劑採購通知", "假日施工單申請已核可", "請問本週假日", "簽核通知", "請核示"]
-DATE_LABELS   = {"今天", "昨天", "本週", "上週", "本月", "上個月", "更早", "今年", "去年"}
+KEYWORD_FOLDER_MAP = {"已離廠": SIGN_FOLDER, "已入廠": SIGN_FOLDER}
+KEYWORDS      = ["入廠施工", "SCI 安全氣候指標", "溶劑採購通知", "假日施工單申請已核可", "火警警報", "電梯安檢", "已離廠", "已入廠", "請問本週假日 是否有安排假日工程"]
+DATE_LABELS   = {"寄件者", "主旨", "訊息摘要", "今天", "昨天", "本週", "上週", "更早", "本月"}
 
 
 def login(page):
