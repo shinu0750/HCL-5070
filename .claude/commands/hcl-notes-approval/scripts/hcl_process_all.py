@@ -106,15 +106,10 @@ def _move_email_to_folder(page, item, folder_name):
         pass
     page.wait_for_timeout(500)
 
-    # 找移動按鈕（collapse-stage-0 class 確保命中可見按鈕）
+    # 找移動按鈕（不要求 collapse-stage-0，該 class 並非所有信件都有）
     move_btn = page.locator(
-        "div.action-tray-populated button.action.pim-move-to-folder.icon.collapse-stage-0"
-    )
-    if not move_btn.is_visible():
-        # fallback：不帶 collapse-stage-0
-        move_btn = page.locator(
-            "div.action-tray-populated button.action.pim-move-to-folder.icon"
-        ).first
+        "div.action-tray-populated button.action.pim-move-to-folder.icon"
+    ).first
     if not move_btn.is_visible():
         return "error_no_button"
     move_btn.click()
