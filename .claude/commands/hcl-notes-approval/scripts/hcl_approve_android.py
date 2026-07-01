@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-Phase 2 (Android) — 透過 DroidMind MCP / ADB 控制 Android 模擬器
-在 HCL Verse Unsigned 資料夾中，逐一開啟信件 → Nomad 表單 → 截圖 OCR 讀取內容 → 核准或離開
+HCL Notes 簽核自動化 — Phase 2 (Android)
+
+Phase 2a (--screenshot-only):
+    逐封開啟 Unsigned 信件 → 截圖 → 回到 Unsigned（不核准）
+    輸出：hcl_screenshots.json
+
+Phase 2b (--approve):
+    讀取 hcl_verified.json（由 Claude skill 層寫入），核准已驗證的信件，跳過未驗證的
+    輸出：hcl_approve_results.json
+
+retry 機制由 Claude skill 層負責：
+    若截圖欄位不完整，skill 層寫入 hcl_retry_subjects.json 後重跑 --screenshot-only，
+    最多 3 輪，仍不完整則標記 screenshot_failed 並警告。
 
 座標系統：橫向 rotation=1，邏輯座標 2400×1080
-
-Nomad 按鈕動態取座標說明：
-  - 按鈕列在 y=[205,299]（center y=252），uiautomator 可讀取（非 WebView）
-  - 按鈕文字寬度不同導致 x 座標隨表單類型變動：
-      加班/外出申請單：離開[148-339] 核准[352-543] 駁回[556-747]
-      未刷卡申請單：   離開(exit)[148-430] 核准[443-634] 駁回[646-837]
-  - 按 x 排序：第 1 個=離開，第 2 個=核准，第 3 個=駁回
-  - 只有 1 個按鈕 → 已核准（只剩離開）；有 3 個 → 待核准
 """
 
 import base64, glob, json, os, re, subprocess, sys, tempfile, time
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-# 載入 .env
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
     with open(_env_path) as _f:
@@ -28,34 +30,36 @@ if os.path.exists(_env_path):
                 _k, _, _v = _line.partition('=')
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-SERIAL       = "emulator-5554"
+SERIAL         = "emulator-5554"
+# 與 hcl_process_all.py 保持一致
+APPROVAL_KEYWORDS = ["外出單", "加班申請", "未刷卡單", "外出單通知"]
+
 _adb_win = r"C:\Users\EID\AppData\Local\Android\Sdk\platform-tools\adb.exe"
 _adb_mac = "/Users/shuhsing/Library/Android/sdk/platform-tools/adb"
-ADB_PATH     = _adb_win if os.path.exists(_adb_win) else _adb_mac
-_TMP         = tempfile.gettempdir()
+ADB_PATH       = _adb_win if os.path.exists(_adb_win) else _adb_mac
+_TMP           = tempfile.gettempdir()
 NOTES_PASSWORD = os.environ.get("HCL_NOTES_PASSWORD", "")
+
 
 class PasswordError(RuntimeError):
     """HCL Notes ID 密碼錯誤或未設定時拋出。"""
     pass
 
+
+class FormOpenError(RuntimeError):
+    """點附件圖示/Link 都無法進入 Nomad 表單時拋出。"""
+    pass
+
+
 # ── 固定座標（橫向 2400×1080）──────────────────────────────────────────────────
 COORD = {
-    # Verse 主畫面
     "main_mail":        (1268, 275),
-    # 漢堡選單 ☰
     "hamburger":        (198,  115),
-    # 側邊選單 Folders
     "menu_folders":     (330,  846),
-    # Folders 列表 — Unsigned 資料夾
     "folder_unsigned":  (1326, 757),
-    # 信件內 📄 附件圖示（WebView，固定位置）
     "attach_icon":      (415,  700),
-    # Comments 對話框 OK（uiautomator 可讀，固定）
     "comments_ok":      (1604, 753),
-    # 遞送完成確認 OK（uiautomator 可讀，固定）
     "delivery_ok":      (1871, 660),
-    # Nomad 按鈕列 fallback（uiautomator 取不到時使用）
     "nomad_leave_fb":   (243,  252),
     "nomad_approve_fb": (447,  252),
 }
@@ -66,53 +70,6 @@ FORM_BUTTONS = {
     "外出單":   {"leave": (243, 252), "approve": (447, 252)},
     "未刷卡":   {"leave": (289, 252), "approve": (538, 252)},
 }
-
-# ── 各表單類型必要欄位（v1.3.1 截圖完整性驗證用）─────────────────────────────────
-# 每個欄位是 (label, [acceptable_patterns]) — OCR 文字去空白後，patterns 任一命中即算截到。
-# Vision OCR 有時會把直書欄位名（如「姓 名」）拆到不同行、中間插入其它欄位文字，
-# 所以「姓名」連續字串可能找不到，需 fallback 到「名：」這類資料行特徵。
-FORM_REQUIRED_FIELDS = {
-    "加班申請": [
-        ("工號",           ["工號", r"號[：:]\s*\d"]),
-        ("姓名",           ["姓名", "名："]),
-        ("部門",           ["部門"]),
-        ("事由",           ["事由"]),
-        ("加班歸屬日期",   ["加班歸屬日期", "歸屬日期"]),
-        ("類別",           ["類別"]),
-        ("加班起訖日期",   ["加班起訖日期", "起訖日期"]),
-        ("加班起訖時間",   ["加班起訖時間", "起訖時間"]),
-        ("申請加班時數",   ["申請加班時數", "加班時數"]),
-        ("申請加班費或轉休", ["申請加班費或轉休", "加班費或轉休"]),
-    ],
-    "外出單": [
-        ("工號",         ["工號", r"號[：:]\s*\d"]),
-        ("姓名",         ["姓名", "名："]),
-        ("部門",         ["部門"]),
-        ("外出事由",     ["外出事由"]),
-        ("外出地點",     ["外出地點"]),
-        ("外出起訖日期", ["外出起訖日期", "起訖日期", "開始日期", "結束日期"]),
-        ("外出起訖時間", ["外出起訖時間", "起訖時間", "開始時間", "結束時間"]),
-    ],
-    "未刷卡": [
-        ("工號",       ["工號", r"號[：:]\s*\d"]),
-        ("姓名",       ["姓名", "名："]),
-        ("部門",       ["部門"]),
-        ("未刷卡原因", ["未刷卡原因"]),
-        ("未刷卡說明", ["未刷卡說明"]),
-        ("未刷卡日期", ["未刷卡日期"]),
-        ("未刷卡時間", ["未刷卡時間"]),
-    ],
-}
-
-def get_form_type(subject):
-    """從主旨判斷表單類型，回傳 '加班申請' / '外出單' / '未刷卡' / None"""
-    if "未刷卡" in subject:
-        return "未刷卡"
-    if "加班申請" in subject:
-        return "加班申請"
-    if "外出單" in subject:
-        return "外出單"
-    return None
 
 KEYCODE_BACK = 4
 
@@ -146,276 +103,17 @@ def dump_ui():
     return adb("shell", "cat", "/sdcard/ui.xml")
 
 
-def screenshot_b64():
-    """取得截圖，回傳 base64 字串（供 AI 視覺判斷）"""
-    raw = subprocess.run(
-        [ADB_PATH, "-s", SERIAL, "shell", "screencap", "-p"],
-        capture_output=True, timeout=15
-    ).stdout
-    return base64.b64encode(raw).decode()
-
-
 def screenshot_to_file(path=None):
     if path is None:
         path = os.path.join(_TMP, "nomad_form.png")
-    """截圖存到本機檔案"""
     adb("shell", "screencap", "-p", "/sdcard/screen.png")
     subprocess.run([ADB_PATH, "-s", SERIAL, "pull", "/sdcard/screen.png", path],
                    capture_output=True)
     return path
 
 
-# ── macOS Vision OCR（v1.3.1 截圖完整性驗證）─────────────────────────────────
-_VISION_LOADED = False
-
-def _ensure_vision():
-    """Lazy-load macOS Vision framework via pyobjc。失敗回傳 False。"""
-    global _VISION_LOADED
-    if _VISION_LOADED:
-        return True
-    try:
-        from objc import loadBundle
-        loadBundle('Vision', globals(),
-                   bundle_path='/System/Library/Frameworks/Vision.framework')
-        _VISION_LOADED = True
-        return True
-    except Exception as e:
-        print(f"    [ocr] Vision 載入失敗：{e}（將跳過內容驗證）", flush=True)
-        return False
-
-
-def ocr_image(path):
-    """用 macOS Vision 對截圖做中文 OCR，回傳全文字串（行以 \\n 分隔）。失敗回傳 ''。"""
-    if not _ensure_vision():
-        return ""
-    try:
-        from Foundation import NSURL
-        url = NSURL.fileURLWithPath_(path)
-        req = VNRecognizeTextRequest.alloc().init()  # noqa: F821
-        req.setRecognitionLevel_(0)  # Accurate
-        req.setRecognitionLanguages_(["zh-Hant", "zh-Hans", "en-US"])
-        req.setUsesLanguageCorrection_(False)
-        handler = VNImageRequestHandler.alloc().initWithURL_options_(url, None)  # noqa: F821
-        handler.performRequests_error_([req], None)
-        lines = []
-        for obs in (req.results() or []):
-            cand = obs.topCandidates_(1)
-            if cand:
-                lines.append(str(cand[0].string()))
-        return "\n".join(lines)
-    except Exception as e:
-        print(f"    [ocr] OCR 失敗：{e}", flush=True)
-        return ""
-
-
-def _coverage_missing(seen_text, required_fields):
-    """
-    回傳尚未在 seen_text 出現的欄位 label list。required_fields=None 時回傳 []。
-    required_fields 格式：[(label, [pattern1, pattern2, ...]), ...]
-      — pattern 可以是純字串或 regex；任一命中即視為該欄位已截到。
-    比對前會把空白移除（OCR 常把「工 號」插空格），所以 patterns 也要相應地無空白。
-    """
-    if not required_fields:
-        return []
-    normalized = re.sub(r"\s+", "", seen_text)
-    missing = []
-    for label, patterns in required_fields:
-        hit = False
-        for p in patterns:
-            try:
-                if re.search(p, normalized):
-                    hit = True
-                    break
-            except re.error:
-                if p in normalized:
-                    hit = True
-                    break
-        if not hit:
-            missing.append(label)
-    return missing
-
-
-def capture_full_form(count, required_fields=None):
-    """
-    Step 1: 等待 Nomad 表單載入完成（Domino 一次渲染完成，無需預捲預載）
-    Step 2: 捲回頂部
-    Step 3: 逐頁往下截圖，每張 OCR 累積必要欄位，
-            欄位收齊或連續手勢無效 → 已到底 → 停止
-
-    參數：
-      count            — 表單流水號（截圖檔名用）
-      required_fields  — 必要欄位 list（取自 FORM_REQUIRED_FIELDS[form_type]），
-                          可為 None；非 None 時每張截圖會 OCR 驗證涵蓋率
-
-    回傳截圖路徑清單 [nomad_form_{count}_a.png, _b.png, ...]，最多 8 頁。
-    """
-    import hashlib
-    from PIL import Image
-    import io
-
-    def content_hash(path, crop_top=50):
-        """Hash only the content area (skip status bar) to avoid clock-tick false positives."""
-        img = Image.open(path)
-        cropped = img.crop((0, crop_top, img.width, img.height))
-        buf = io.BytesIO()
-        cropped.save(buf, format="PNG")
-        return hashlib.md5(buf.getvalue()).hexdigest()
-
-    # ── Step 1: 等待載入完成 ──────────────────────────────────────────────────
-    # Nomad "Please wait..." 動畫持續變化，載入完成後畫面靜止。
-    # 每 3 秒截一張；連續兩張 hash 相同 → 靜止 = 表單已就緒。
-    # 使用 3 秒間隔確保 spinner 不會恰好轉回同位置造成誤判。
-    print("    等待表單載入...", flush=True)
-    load_timeout = 30
-    load_start = time.time()
-    prev_load_hash = None
-    while time.time() - load_start < load_timeout:
-        tmp_path = os.path.join(_TMP, "nomad_load_check.png")
-        screenshot_to_file(tmp_path)
-        load_hash = content_hash(tmp_path)
-        if load_hash == prev_load_hash:
-            print(f"    表單已載入（{time.time() - load_start:.1f}s）", flush=True)
-            break
-        prev_load_hash = load_hash
-        time.sleep(3)
-    else:
-        print("    ⚠️ 載入等待逾時，繼續執行", flush=True)
-
-    # ── Step 2: 捲回頂部（hash 驗證，確保真的到頂）──────────────────────────────
-    # 手勢必須落在 WebView 內容區內：工具列在 y≤310（核准/離開/駁回按鈕 bounds 到 y=299），
-    # 底部「外出申請單」chip 在 y≥860；故起訖點取 y=450↔820，避免空滑或誤觸按鈕。
-    # 由上往下滑 → 內容下移 → 顯露頂部；連續兩張 hash 相同 = 已到頂 → 停止。
-    # 修正前：起點 y=200 壓在工具列上，滑動沒傳進 WebView，盲捲 5 次常停在下半段。
-    prev_top_hash = None
-    for _ in range(12):  # 上限 12 次，足夠捲完最長表單
-        adb("shell", "input", "swipe", "1200", "330", "1200", "630", "300")
-        time.sleep(0.5)
-        _top_check = os.path.join(_TMP, "nomad_top_check.png")
-        screenshot_to_file(_top_check)
-        top_hash = content_hash(_top_check)
-        if top_hash == prev_top_hash:
-            break  # 捲動後畫面未變 = 已到頂
-        prev_top_hash = top_hash
-    time.sleep(0.5)
-
-    # ── Step 3: 逐頁截圖直到底部（v1.3：截圖後驗證捲動是否成功）─────────────
-    # 設計：每次「截圖 → 比對 → 捲動 → 重截 → 驗證」一個完整動作循環：
-    #   1. 截圖 current
-    #   2. 與 prev_hash 比對：相同 = 上一次捲動沒效果（或真到底）
-    #      → 用「更強手勢」重試捲動（起點更高、終點更低、duration 更長）
-    #      → 連續 RETRY_LIMIT 次捲完仍未變 → 確認到底
-    #   3. 不同 → 視為新一頁，存檔，繼續
-    # 修正前：第一次截圖後立刻捲一次，第二張若 hash 相同就直接 break，
-    #         導致「捲動沒生效（短表單／簽核完成唯讀模式）」被誤判為「已到底」，
-    #         漏截日期/時間/事由等下半段欄位（form 4、form 6 受害）。
-    SCROLL_VARIANTS = [
-        ("1200", "620", "1200", "350", "400"),   # 標準：WebView 內容區中段
-        ("1200", "650", "1200", "310", "500"),   # 加強：較大行程、較慢
-        ("1500", "640", "1500", "300", "700"),   # 最強：靠右側、最大行程
-    ]
-    RETRY_LIMIT = len(SCROLL_VARIANTS)  # 3 次手勢都沒變 → 真的到底
-    MIN_PAGES_BEFORE_BOTTOM = 2  # 至少要 2 張不同截圖才允許判定到底
-
-    paths = []
-    prev_hash = None
-    accumulated_text = ""  # v1.3.1：累積所有截圖的 OCR 文字，用於欄位涵蓋率驗證
-
-    for i in range(8):  # 最多 8 頁
-        path = os.path.join(_TMP, f"nomad_form_{count}_{chr(ord('a') + i)}.png")
-        screenshot_to_file(path)
-
-        current_hash = content_hash(path)
-
-        if current_hash == prev_hash:
-            # 上次捲動沒效果 → 用更強手勢重試，仍無效才真正到底
-            if len(paths) < MIN_PAGES_BEFORE_BOTTOM:
-                print(f"    [retry] 第 {i} 頁 hash 未變且僅 {len(paths)} 張，"
-                      f"加強手勢重試 (≤{MIN_PAGES_BEFORE_BOTTOM} 張下限)", flush=True)
-            else:
-                print(f"    [retry] 第 {i} 頁 hash 未變，加強手勢重試", flush=True)
-
-            retried = False
-            for variant_idx, swipe_args in enumerate(SCROLL_VARIANTS, 1):
-                adb("shell", "input", "swipe", *swipe_args)
-                time.sleep(1.0)
-                screenshot_to_file(path)
-                retry_hash = content_hash(path)
-                if retry_hash != prev_hash:
-                    print(f"    [retry] 變體 {variant_idx} 成功，捲到新一頁", flush=True)
-                    current_hash = retry_hash
-                    retried = True
-                    break
-                print(f"    [retry] 變體 {variant_idx} 仍未變", flush=True)
-
-            if not retried:
-                # 連續所有手勢都沒讓畫面變 → 確認到底
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
-                missing = _coverage_missing(accumulated_text, required_fields)
-                if missing:
-                    print(f"    ⚠️ 到達底部但仍缺欄位 {missing}（共 {len(paths)} 張）",
-                          flush=True)
-                else:
-                    print(f"    到達底部（{RETRY_LIMIT} 次手勢確認），共 {len(paths)} 張截圖",
-                          flush=True)
-                break
-
-        # v1.3.1：對本張做 OCR，累積文字並回報尚未截到的欄位
-        page_text = ocr_image(path) if required_fields else ""
-        if page_text:
-            accumulated_text += "\n" + page_text
-
-        paths.append(path)
-        print(f"    截圖 [{chr(ord('a') + i)}]：{path}", flush=True)
-
-        # 涵蓋率驗證：所有必要欄位都已在 accumulated_text 中 → 不需再捲
-        if required_fields:
-            missing = _coverage_missing(accumulated_text, required_fields)
-            if not missing:
-                print(f"    ✓ 必要欄位已全部截到（{len(required_fields)} 項），停止捲動",
-                      flush=True)
-                break
-            else:
-                print(f"    [coverage] 仍缺 {len(missing)} 項：{missing[:5]}"
-                      f"{'…' if len(missing) > 5 else ''}", flush=True)
-
-        prev_hash = current_hash
-
-        # 標準下捲手勢（重試已在 hash-fail 分支內處理）
-        adb("shell", "input", "swipe", *SCROLL_VARIANTS[0])
-        time.sleep(0.8)
-    else:
-        print(f"    截圖達到上限（8 頁），共 {len(paths)} 張", flush=True)
-        if required_fields:
-            missing = _coverage_missing(accumulated_text, required_fields)
-            if missing:
-                print(f"    ⚠️ 達上限仍缺欄位 {missing}", flush=True)
-
-    if not paths:
-        # 保險：至少回傳一張
-        path = os.path.join(_TMP, f"nomad_form_{count}_a.png")
-        screenshot_to_file(path)
-        paths = [path]
-
-    return paths
-
-
-def wait_for_ui(pattern, timeout=8, interval=1.0):
-    """輪詢 uiautomator dump，直到 XML 符合 regex pattern 或逾時。回傳 bool。（改善 #3）"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        xml = dump_ui()
-        if re.search(pattern, xml):
-            return True
-        time.sleep(interval)
-    return False
-
-
 def clear_stale_screenshots():
-    """清除上次執行遺留的表單截圖，避免 Phase 4 OCR 讀到舊圖（改善 #7）
-    涵蓋新格式：nomad_form_{N}_{a-h}.png（改善 #9 逐頁截圖）"""
+    """清除上次執行遺留的表單截圖。"""
     stale = glob.glob(os.path.join(_TMP, "nomad_form_*.png"))
     for f in stale:
         try:
@@ -427,38 +125,137 @@ def clear_stale_screenshots():
 
 
 # ════════════════════════════════════════════════════════════════════════════════
+# 截圖工具
+# ════════════════════════════════════════════════════════════════════════════════
+
+def capture_full_form(count):
+    """
+    截圖 Nomad 表單所有頁面。
+    Step 1: 等待表單載入完成（hash 靜止）
+    Step 2: 捲回頂部（hash 驗證）
+    Step 3: 逐頁截圖直到底部（hash 不變 + 多變體手勢確認）
+    回傳截圖路徑清單（最多 8 頁）。
+    """
+    import hashlib
+    from PIL import Image
+    import io
+
+    def content_hash(path, crop_top=50):
+        """Hash 內容區域（跳過狀態列避免時鐘誤判）。"""
+        img = Image.open(path)
+        cropped = img.crop((0, crop_top, img.width, img.height))
+        buf = io.BytesIO()
+        cropped.save(buf, format="PNG")
+        return hashlib.md5(buf.getvalue()).hexdigest()
+
+    # Step 1: 等待載入完成
+    print("    等待表單載入...", flush=True)
+    load_start = time.time()
+    prev_load_hash = None
+    while time.time() - load_start < 30:
+        tmp_path = os.path.join(_TMP, "nomad_load_check.png")
+        screenshot_to_file(tmp_path)
+        load_hash = content_hash(tmp_path)
+        if load_hash == prev_load_hash:
+            print(f"    表單已載入（{time.time() - load_start:.1f}s）", flush=True)
+            break
+        prev_load_hash = load_hash
+        time.sleep(3)
+    else:
+        print("    ⚠️ 載入等待逾時，繼續執行", flush=True)
+
+    # Step 2: 捲回頂部
+    prev_top_hash = None
+    for _ in range(12):
+        adb("shell", "input", "swipe", "1200", "330", "1200", "630", "300")
+        time.sleep(0.5)
+        _top_check = os.path.join(_TMP, "nomad_top_check.png")
+        screenshot_to_file(_top_check)
+        top_hash = content_hash(_top_check)
+        if top_hash == prev_top_hash:
+            break
+        prev_top_hash = top_hash
+    time.sleep(0.5)
+
+    # Step 3: 逐頁截圖
+    SCROLL_VARIANTS = [
+        ("1200", "620", "1200", "350", "400"),
+        ("1200", "650", "1200", "310", "500"),
+        ("1500", "640", "1500", "300", "700"),
+    ]
+    MIN_PAGES_BEFORE_BOTTOM = 2
+
+    paths = []
+    prev_hash = None
+
+    for i in range(8):
+        path = os.path.join(_TMP, f"nomad_form_{count}_{chr(ord('a') + i)}.png")
+        screenshot_to_file(path)
+        current_hash = content_hash(path)
+
+        if current_hash == prev_hash:
+            retried = False
+            for v_idx, swipe_args in enumerate(SCROLL_VARIANTS, 1):
+                adb("shell", "input", "swipe", *swipe_args)
+                time.sleep(1.0)
+                screenshot_to_file(path)
+                retry_hash = content_hash(path)
+                if retry_hash != prev_hash:
+                    print(f"    [retry] 變體 {v_idx} 成功", flush=True)
+                    current_hash = retry_hash
+                    retried = True
+                    break
+
+            if not retried:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                print(f"    到達底部，共 {len(paths)} 張截圖", flush=True)
+                break
+
+        paths.append(path)
+        print(f"    截圖 [{chr(ord('a') + i)}]：{path}", flush=True)
+        prev_hash = current_hash
+
+        adb("shell", "input", "swipe", *SCROLL_VARIANTS[0])
+        time.sleep(0.8)
+    else:
+        print(f"    截圖達到上限（8 頁），共 {len(paths)} 張", flush=True)
+
+    if not paths:
+        path = os.path.join(_TMP, f"nomad_form_{count}_a.png")
+        screenshot_to_file(path)
+        paths = [path]
+
+    return paths
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 # Nomad 按鈕動態偵測
 # ════════════════════════════════════════════════════════════════════════════════
 
 def find_nomad_buttons(retry=3):
     """
     從 uiautomator dump 動態取 Nomad 按鈕列座標。
-    按鈕列特徵：y 範圍在 [200, 310]，由左到右排列為 離開 / 核准 / 駁回。
-
-    回傳 dict：
-      {
-        "leave":   (cx, cy),        # 一定存在
-        "approve": (cx, cy) | None, # 待核准時存在
-        "reject":  (cx, cy) | None, # 待核准時存在
-      }
-    取不到時回傳 fallback 座標（加班/外出申請單預設值）。
+    按 x 排序：第 1 個=離開，第 2 個=核准，第 3 個=駁回。
+    只有 1 個按鈕 → 已核准（只剩離開）。
+    取不到時 fallback 到預設值。
     """
     BUTTON_Y_MIN, BUTTON_Y_MAX = 200, 310
 
     for attempt in range(retry):
         xml = dump_ui()
-        # 找所有 clickable=true 且 bounds 的 y 範圍在按鈕列內的節點
         pattern = r'clickable="true"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
         candidates = []
         for m in re.finditer(pattern, xml):
             x1, y1, x2, y2 = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
             cy = (y1 + y2) // 2
-            # 過濾出按鈕列範圍，排除全螢幕容器（width > 1000）
             if BUTTON_Y_MIN <= cy <= BUTTON_Y_MAX and (x2 - x1) < 600:
                 cx = (x1 + x2) // 2
                 candidates.append((cx, cy))
 
-        candidates.sort(key=lambda p: p[0])  # 按 x 排序
+        candidates.sort(key=lambda p: p[0])
 
         if len(candidates) >= 1:
             result = {
@@ -466,19 +263,32 @@ def find_nomad_buttons(retry=3):
                 "approve": candidates[1] if len(candidates) >= 2 else None,
                 "reject":  candidates[2] if len(candidates) >= 3 else None,
             }
-            print(f"    [buttons] leave={result['leave']} approve={result['approve']} reject={result['reject']}", flush=True)
+            print(f"    [buttons] leave={result['leave']} approve={result['approve']}", flush=True)
             return result
 
         print(f"    [buttons] 第 {attempt+1} 次取不到，等 2 秒重試...", flush=True)
         time.sleep(2)
 
-    # Fallback：加班/外出申請單預設值
     print("    [buttons] fallback 到預設座標", flush=True)
     return {
         "leave":   COORD["nomad_leave_fb"],
         "approve": COORD["nomad_approve_fb"],
         "reject":  None,
     }
+
+
+def _nomad_button_count():
+    """讀取 Nomad 按鈕列目前的按鈕數（3=待核准，1=已核准，0=表單已關閉）。"""
+    BUTTON_Y_MIN, BUTTON_Y_MAX = 200, 310
+    xml = dump_ui()
+    pattern = r'clickable="true"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+    count = 0
+    for m in re.finditer(pattern, xml):
+        x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
+        cy = (y1 + y2) // 2
+        if BUTTON_Y_MIN <= cy <= BUTTON_Y_MAX and (x2 - x1) < 600:
+            count += 1
+    return count
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -492,20 +302,17 @@ def launch_verse():
 
 
 def sync_now():
-    """點 ⋮ → Sync Now 觸發伺服器同步"""
+    """點 ⋮ → Sync Now 觸發伺服器同步。"""
     xml = dump_ui()
-    # 找 ⋮（More options）按鈕
     mo = re.search(r'content-desc="More options"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
     if mo:
         cx = (int(mo.group(1)) + int(mo.group(3))) // 2
         cy = (int(mo.group(2)) + int(mo.group(4))) // 2
         adb("shell", "input", "tap", str(cx), str(cy))
     else:
-        # fallback：右上角固定位置
         adb("shell", "input", "tap", "2350", "115")
     time.sleep(1)
 
-    # 點 Sync Now
     xml = dump_ui()
     sn = re.search(r'text="Sync Now"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
     if sn:
@@ -519,46 +326,8 @@ def sync_now():
     time.sleep(2)
 
 
-def force_sync_unsigned(expected_count, poll_interval=3, timeout=60):
-    """
-    確保在 Unsigned 資料夾並同步。
-    只要有任何信件（>= 1）即繼續；timeout 後不管數量直接處理。
-    expected_count=0（遺留檢查模式）時縮短 timeout，沒信件就快速返回（改善 #1）。
-    回傳最終取得的 email_list。
-    """
-    if expected_count == 0:
-        timeout = min(timeout, 12)
-    print(f"  確保乾淨狀態，導航到 Unsigned（預期新增 {expected_count} 封）...", flush=True)
-    ensure_clean_state()
-    navigate_to_unsigned()
-    time.sleep(1)
-    sync_now()
-    # sync_now 可能離開 Unsigned，重新導航
-    ensure_clean_state()
-    navigate_to_unsigned()
-    time.sleep(2)
-
-    elapsed = 0
-    actual = 0
-    while elapsed < timeout:
-        email_list = get_email_list()
-        actual = len(email_list)
-        print(f"  [{elapsed}s] Unsigned 目前 {actual} 封", flush=True)
-        if actual >= 1:
-            return email_list
-        time.sleep(poll_interval)
-        elapsed += poll_interval
-
-    print(f"  警告：{timeout}s 後仍沒有信件，繼續嘗試", flush=True)
-    return get_email_list()
-
-
 def _in_unsigned_list(xml=None):
-    """
-    判斷目前是否在 Unsigned 信件列表頁。
-    注意：Folders 資料夾列表頁也含有「Unsigned」文字（資料夾項目），
-    必須排除（該頁標題為 Folders）。
-    """
+    """判斷目前是否在 Unsigned 信件列表頁（排除 Folders 列表頁）。"""
     if xml is None:
         xml = dump_ui()
     return ('text="Unsigned"' in xml
@@ -568,7 +337,7 @@ def _in_unsigned_list(xml=None):
 
 
 def _tap_text(xml, text, fallback=None, delay=2):
-    """從 dump XML 找指定 text 節點的 bounds 並 tap 中心點；找不到用 fallback 座標"""
+    """從 dump XML 找指定 text 節點並 tap 中心點；找不到用 fallback 座標。"""
     m = re.search(
         rf'text="{re.escape(text)}"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
     if m:
@@ -583,7 +352,7 @@ def _tap_text(xml, text, fallback=None, delay=2):
 
 
 def ensure_clean_state():
-    """按 Back 2-3 次，確保不在任何開著的信件或子選單內"""
+    """按 Back 2-3 次，確保不在任何開著的信件或子選單內。"""
     for _ in range(3):
         if _in_unsigned_list():
             return
@@ -592,44 +361,38 @@ def ensure_clean_state():
 
 
 def navigate_to_unsigned(_depth=0):
-    """從 Verse 主畫面或任何畫面導航到 Unsigned 資料夾（資料夾項目動態定位）"""
+    """從任何畫面導航到 Unsigned 資料夾（狀態感知，最多 7 層遞迴）。"""
     if _depth > 7:
         print("  警告：導航到 Unsigned 失敗（重試超過上限）", flush=True)
         return False
 
     xml = dump_ui()
 
-    # 如果已在 Unsigned 列表，直接回傳
     if _in_unsigned_list(xml):
         print("  已在 Unsigned 資料夾", flush=True)
         return True
 
-    # 如果在 Unsigned Subscribe 頁（資料夾尚未訂閱）→ 點 Subscribe 並等待 sync
     if 'text="Unsigned"' in xml and 'text="Subscribe"' in xml:
         print("  Unsigned 尚未訂閱，點 Subscribe...", flush=True)
         _tap_text(xml, "Subscribe", delay=10)
         return navigate_to_unsigned(_depth + 1)
 
-    # 如果還停在 Nomad app（表單核准/離開後常見）→ 直接切回 Verse
     if 'package="com.lotus.nomad"' in xml:
         print("  仍在 Nomad app，切回 Verse...", flush=True)
         launch_verse()
         return navigate_to_unsigned(_depth + 1)
 
-    # 如果在開啟的信件檢視頁（Message）→ 按 Back 回列表
     if 'text="Message"' in xml:
         print("  在信件檢視頁，按 Back 回列表...", flush=True)
         press_back(delay=2)
         return navigate_to_unsigned(_depth + 1)
 
-    # 如果在 Folders 資料夾列表頁 → 點 Unsigned（若不在畫面內先往下捲找）
     if 'text="Folders"' in xml:
         if 'text="Unsigned"' in xml:
-            print("  在 Folders 列表，點 Unsigned 資料夾...", flush=True)
+            print("  在 Folders 列表，點 Unsigned...", flush=True)
             _tap_text(xml, "Unsigned", delay=2)
             return navigate_to_unsigned(_depth + 1)
-        # Unsigned 在捲動區域外，往下捲最多 3 次再找
-        print("  在 Folders 列表，Unsigned 不在畫面內，往下捲找...", flush=True)
+        print("  在 Folders 列表，往下捲找 Unsigned...", flush=True)
         for _ in range(3):
             adb("shell", "input", "swipe", "1200", "800", "1200", "300", "500")
             time.sleep(1)
@@ -637,18 +400,15 @@ def navigate_to_unsigned(_depth=0):
             if 'text="Unsigned"' in xml2:
                 _tap_text(xml2, "Unsigned", delay=2)
                 return navigate_to_unsigned(_depth + 1)
-        # 捲完還找不到，fallback 固定座標（前次已在捲底，Unsigned 約在 y=578）
-        print("  警告：捲完仍找不到 Unsigned，使用固定座標 (1336, 578)...", flush=True)
+        print("  警告：捲完仍找不到 Unsigned，使用固定座標...", flush=True)
         tap(1336, 578, delay=2)
         return navigate_to_unsigned(_depth + 1)
 
-    # 如果在 Verse 主畫面 → 點 Mail
     if 'text="Mail"' in xml:
         print("  從主畫面進入 Mail...", flush=True)
         tap(*COORD["main_mail"], delay=2)
         xml = dump_ui()
 
-    # 開漢堡選單 → Folders → Unsigned（後兩步動態定位）
     if 'text="Inbox"' in xml or 'id/toolbar' in xml:
         print("  開選單 → Folders → Unsigned...", flush=True)
         tap(*COORD["hamburger"], delay=1)
@@ -657,7 +417,6 @@ def navigate_to_unsigned(_depth=0):
         time.sleep(0.5)
         return navigate_to_unsigned(_depth + 1)
 
-    # 可能正在畫面轉場，先等 2 秒重新判斷，連續失敗才重啟
     if _depth < 2:
         print("  無法識別目前畫面，等 2 秒重新判斷...", flush=True)
         time.sleep(2)
@@ -674,10 +433,7 @@ def navigate_to_unsigned(_depth=0):
 # ════════════════════════════════════════════════════════════════════════════════
 
 def get_email_list():
-    """
-    讀取目前畫面上可見的信件列表。
-    回傳 [(cx, cy, subject_text), ...] 按 y 座標排列。
-    """
+    """讀取目前畫面上可見的信件列表。回傳 [(cx, cy, subject), ...] 按 y 排列。"""
     xml = dump_ui()
     subj_pattern = (
         r'text="([^"]*)"[^>]*'
@@ -688,45 +444,41 @@ def get_email_list():
     for m in re.finditer(subj_pattern, xml):
         text = m.group(1)
         x1, y1, x2, y2 = int(m.group(2)), int(m.group(3)), int(m.group(4)), int(m.group(5))
-        cx = 1268
         cy = (y1 + y2) // 2
-        items.append((cx, cy, text))
+        items.append((1268, cy, text))
     items.sort(key=lambda x: x[1])
     return items
 
 
-def scroll_to_top():
-    """捲回列表頂部"""
+def scroll_to_top_list():
     adb("shell", "input", "swipe", "1200", "300", "1200", "900", "400")
     time.sleep(1)
 
 
-def scroll_down():
-    """往下捲一頁"""
+def scroll_down_list():
     adb("shell", "input", "swipe", "1200", "800", "1200", "300", "400")
     time.sleep(1)
 
 
-def find_next_email(processed):
+def find_next_email(processed, subject_filter=None):
     """
     在 Unsigned 列表中找第一封尚未處理的信件（支援捲動）。
-    processed 是 dict {subject: 已處理封數}，以「出現次數」支援同主旨多封信件（改善 #5）：
-    同主旨第 N 封只有在 processed[subject] < N 時才會被選中。
-    回傳 (cx, cy, subject_text) 或 None。
+    processed: {subject: 已處理封數}
+    subject_filter: 若指定，只返回此集合內的主旨（None = 不限制）
+    回傳 (cx, cy, subject) 或 None。
     """
-    scroll_to_top()
-    time.sleep(1.5)  # 等列表完全載入後再讀取
-    occurrence = {}   # 本次掃描中各主旨累計出現次數
-    prev_texts = []   # 上一頁主旨序列（用於去除捲動重疊）
+    scroll_to_top_list()
+    time.sleep(1.5)
+    occurrence = {}
+    prev_texts = []
 
-    for _ in range(10):  # 最多捲 10 次
+    for _ in range(10):
         items = get_email_list()
         texts = [t for _, _, t in items]
 
         if prev_texts and texts == prev_texts:
-            break  # 捲動後內容不變，已到底部
+            break
 
-        # 去除與上一頁重疊的部分，避免同一封信被重複計數
         new_items = items
         if prev_texts:
             max_k = min(len(prev_texts), len(texts))
@@ -736,12 +488,18 @@ def find_next_email(processed):
                     break
 
         for cx, cy, text in new_items:
+            if not any(k in text for k in APPROVAL_KEYWORDS):
+                print(f"    [skip] 主旨不符關鍵字，略過：{text[:40]}", flush=True)
+                processed[text] = processed.get(text, 0) + 1
+                continue
+            if subject_filter is not None and text not in subject_filter:
+                continue
             occurrence[text] = occurrence.get(text, 0) + 1
             if occurrence[text] > processed.get(text, 0):
                 return (cx, cy, text)
 
         prev_texts = texts
-        scroll_down()
+        scroll_down_list()
 
     return None
 
@@ -750,21 +508,26 @@ def find_next_email(processed):
 # Nomad 表單操作
 # ════════════════════════════════════════════════════════════════════════════════
 
+def get_form_type(subject):
+    """從主旨判斷表單類型，回傳 '加班申請' / '外出單' / '未刷卡' / None。"""
+    if "未刷卡" in subject:
+        return "未刷卡"
+    if "加班申請" in subject:
+        return "加班申請"
+    if "外出單" in subject:
+        return "外出單"
+    return None
+
+
 def handle_notes_password_dialog():
-    """
-    偵測並處理 Notes ID Password 對話框。
-    若出現，輸入密碼並點 OK。
-    """
+    """偵測並處理 Notes ID Password 對話框，自動輸入密碼。"""
     xml = dump_ui()
     if 'Notes ID Password' not in xml and 'Notes ID password' not in xml:
         return False
 
     print("    偵測到 Notes ID Password 對話框，自動輸入密碼...", flush=True)
-    # 找密碼輸入框：EditText 且 password=true 或 hint 含 Password
     pw_match = re.search(
-        r'class="android\.widget\.EditText"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-        xml
-    )
+        r'class="android\.widget\.EditText"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
     if pw_match:
         cx = (int(pw_match.group(1)) + int(pw_match.group(3))) // 2
         cy = (int(pw_match.group(2)) + int(pw_match.group(4))) // 2
@@ -772,12 +535,10 @@ def handle_notes_password_dialog():
     else:
         tap(1200, 540, delay=0.5)
 
-    # 先清空欄位（全選＋刪除）
-    adb("shell", "input", "keyevent", "277")  # KEYCODE_CTRL_A (select all)
+    adb("shell", "input", "keyevent", "277")  # KEYCODE_CTRL_A
     adb("shell", "input", "keyevent", "67")   # KEYCODE_DEL
     time.sleep(0.3)
 
-    # 用 keycode 逐字輸入，避免剪貼簿污染
     DIGIT_KEYCODES = {'0':7,'1':8,'2':9,'3':10,'4':11,'5':12,'6':13,'7':14,'8':15,'9':16}
     for ch in NOTES_PASSWORD:
         kc = DIGIT_KEYCODES.get(ch)
@@ -787,16 +548,14 @@ def handle_notes_password_dialog():
             adb("shell", "input", "text", ch)
         time.sleep(0.1)
 
-    # 按 Enter 送出
     adb("shell", "input", "keyevent", "66")
     print("    密碼已送出，等待 Nomad 載入...", flush=True)
     time.sleep(5)
 
-    # 驗證密碼是否被接受
     xml_after = dump_ui()
     if 'Wrong Password' in xml_after or 'wrong password' in xml_after.lower():
-        print("    ✗ Notes ID 密碼錯誤！請確認 ~/.hermes/.env 中 HCL_NOTES_PASSWORD", flush=True)
-        _tap_text(xml_after, "OK", delay=1)  # 關掉 Wrong Password 對話框
+        print("    ✗ Notes ID 密碼錯誤！", flush=True)
+        _tap_text(xml_after, "OK", delay=1)
         raise PasswordError("Notes ID 密碼錯誤，請確認 HCL_NOTES_PASSWORD 環境變數")
     return True
 
@@ -814,18 +573,10 @@ def _current_foreground_pkg():
 
 
 def _try_open_link_text(timeout=6):
-    """
-    fallback：當 (415,700) 沒打中附件圖示時（純通知信常見，內文是
-    "[ 📄 | Link ]" 文字而非真正的附件 icon），改用 uiautomator dump
-    找到 "Link" 超連結文字節點並點擊。
-    回傳 True 表示找到並點了。
-    """
+    """Fallback：找 'Link' 超連結文字節點並點擊（純通知信常見）。"""
     xml = dump_ui()
-    # 找 text="Link" 或 content-desc="Link" 的 clickable 節點
     for m in re.finditer(
-        r'(?:text|content-desc)="Link"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
-        xml,
-    ):
+        r'(?:text|content-desc)="Link"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml):
         x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
         print(f"    [fallback] 改點 Link 文字 ({cx}, {cy})", flush=True)
@@ -835,13 +586,8 @@ def _try_open_link_text(timeout=6):
 
 
 def _open_nomad_from_chrome_url():
-    """
-    若 Chrome 被開啟（Link 點擊後 https:// 被 Chrome 攔截），
-    從 Chrome address bar 取 URL → 換成 notes:// scheme → am start 開 Nomad。
-    回傳 True 若成功進入 Nomad。
-    """
+    """若 Chrome 被開啟，從 address bar 取 URL → 轉 notes:// → am start 開 Nomad。"""
     xml = dump_ui()
-    # Chrome address bar 的 URL 會出現在 text 節點
     portal_domain = os.environ.get("HCL_PORTAL_HOST", "portal.ecic.com.tw")
     url_match = None
     for m in re.finditer(r'text="([^"]*' + re.escape(portal_domain) + r'[^"]*)"', xml):
@@ -851,16 +597,13 @@ def _open_nomad_from_chrome_url():
         print("    ⚠️ Chrome 未找到 portal URL", flush=True)
         return False
 
-    # 轉換 notes:// scheme
     https_url = url_match if url_match.startswith("http") else "https://" + url_match
     notes_url = re.sub(r'^https?://', 'notes://', https_url)
     print(f"    [notes intent] {notes_url[:80]}...", flush=True)
 
-    # 關閉 Chrome，回到 Verse
     adb("shell", "input", "keyevent", "4")
     time.sleep(1)
 
-    # 用 am start 直接開 Nomad
     adb("shell", "am", "start",
         "-a", "android.intent.action.VIEW",
         "-d", notes_url,
@@ -870,12 +613,18 @@ def _open_nomad_from_chrome_url():
     return "nomad" in pkg.lower()
 
 
-def open_nomad_form(email_cx, email_cy):
-    """點開信件 → 點附件圖示開啟 Nomad → 每次都確認密碼對話框
+def _find_link_bounds():
+    """尋找信件內文 'Link' 超連結節點的 bounds，用來回推左側附件圖示座標。"""
+    xml = dump_ui()
+    m = re.search(
+        r'(?:text|content-desc)="Link"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
+    if m:
+        return tuple(int(m.group(i)) for i in range(1, 5))
+    return None
 
-    v1.4 新增：若 Link 點擊後 Chrome 被開啟（https:// URL），
-    自動從 Chrome address bar 抓 URL → 轉換 notes:// → am start 開 Nomad。
-    """
+
+def open_nomad_form(email_cx, email_cy):
+    """點開信件 → 點附件圖示開啟 Nomad，處理密碼對話框與各種 fallback。"""
     print(f"    點開信件 ({email_cx}, {email_cy})", flush=True)
     tap(email_cx, email_cy, delay=2.5)
     print(f"    點附件圖示 {COORD['attach_icon']}", flush=True)
@@ -884,18 +633,33 @@ def open_nomad_form(email_cx, email_cy):
 
     pkg = _current_foreground_pkg()
     if "nomad" in pkg.lower():
-        return  # 已在 Nomad，完成
+        return
 
-    print(f"    ⚠️ Nomad 未開啟（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
+    # 固定座標打不中：信件內文行數不同（例如通知信正文較短）會讓圖示的實際 y 座標
+    # 偏離固定值。改用內文中 'Link' 超連結節點的位置往左推算圖示座標再點一次，
+    # 比直接點 Link 文字可靠 —— Link 文字有時會被 Chrome 攔截導向網頁而非開啟 Nomad
+    # （2026-07-01 楊梓盛外出單通知信案例：固定座標與 Link 皆落空，最終手動確認
+    # 圖示實際位置在 Link 節點左側約 90px）。
+    link_bounds = _find_link_bounds()
+    if link_bounds:
+        x1, y1, x2, y2 = link_bounds
+        icon_x, icon_y = max(x1 - 90, 0), (y1 + y2) // 2
+        print(f"    ⚠️ 固定座標未進入 Nomad（前景：{pkg or '未知'}），"
+              f"依 Link 節點 {link_bounds} 改點左側附件圖示 ({icon_x}, {icon_y})", flush=True)
+        tap(icon_x, icon_y, delay=5)
+        handle_notes_password_dialog()
+        pkg = _current_foreground_pkg()
+        if "nomad" in pkg.lower():
+            return
+
+    print(f"    ⚠️ 仍未進入 Nomad（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
     if _try_open_link_text():
         handle_notes_password_dialog()
         pkg = _current_foreground_pkg()
         if "nomad" in pkg.lower():
-            return  # 點 Link 後進入 Nomad
-
-        # Link 點了但 Chrome 開了 → 用 notes:// intent
+            return
         if "chrome" in pkg.lower():
-            print("    Chrome 攔截了連結，改用 notes:// intent 開 Nomad...", flush=True)
+            print("    Chrome 攔截了連結，改用 notes:// intent...", flush=True)
             if _open_nomad_from_chrome_url():
                 handle_notes_password_dialog()
                 return
@@ -903,38 +667,16 @@ def open_nomad_form(email_cx, email_cy):
     else:
         print("    ⚠️ 找不到 Link 文字節點，將截到 Verse email view", flush=True)
 
-
-def read_form_via_screenshot():
-    """截圖存到 temp/nomad_form.png，供 AI OCR 讀取表單內容。回傳截圖路徑。"""
-    path = screenshot_to_file(os.path.join(_TMP, "nomad_form.png"))
-    print(f"    截圖已儲存：{path}", flush=True)
-    return path
-
-
-def _nomad_button_count():
-    """
-    讀取 Nomad 按鈕列目前的按鈕數（不使用 fallback）。
-    3=待核准（離開/核准/駁回）、1=已核准（只剩離開）、0=表單已關閉。
-    """
-    BUTTON_Y_MIN, BUTTON_Y_MAX = 200, 310
-    xml = dump_ui()
-    pattern = r'clickable="true"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
-    count = 0
-    for m in re.finditer(pattern, xml):
-        x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
-        cy = (y1 + y2) // 2
-        if BUTTON_Y_MIN <= cy <= BUTTON_Y_MAX and (x2 - x1) < 600:
-            count += 1
-    return count
+    # 所有 fallback 都失敗：明確拋例外讓上層標記 error/approve_failed，
+    # 留在 Unsigned 供下次執行的遺留檢查接手，而不是靜默對著錯誤畫面（例如
+    # Chrome 意外開啟的網頁）繼續截圖、產生看似成功但內容錯誤的結果。
+    raise FormOpenError(f"無法開啟 Nomad 表單，前景 app 為：{pkg or '未知'}")
 
 
 def do_approve(buttons):
     """
-    執行核准程序：核准 → Comments OK → 遞送 OK
-    對話框（Nomad 內部渲染）uiautomator 不一定可見，因此採「容錯按下固定座標 +
-    最終語意驗證」：核准完成後按鈕列的核准/駁回按鈕應消失（剩 0 或 1 個按鈕），
-    仍偵測到 >= 2 個按鈕則標記 approve_failed（改善 #3）。
-    buttons: find_nomad_buttons() 的回傳值
+    執行核准：核准 → Comments OK → 遞送 OK。
+    最終驗證按鈕列：核准/駁回按鈕應消失（剩 0~1 個）。
     """
     approve_coord = buttons.get("approve") or COORD["nomad_approve_fb"]
     print(f"    執行核准 {approve_coord}...", flush=True)
@@ -942,25 +684,22 @@ def do_approve(buttons):
     tap(*COORD["comments_ok"], delay=2)
     tap(*COORD["delivery_ok"], delay=3)
 
-    # 「遞送完成」對話框可能渲染較慢、固定座標按太早沒按到 → 用 dump 找 OK 補按
     xml = dump_ui()
     if 'text="OK"' in xml:
         print("    偵測到殘留對話框，補按 OK...", flush=True)
         _tap_text(xml, "OK", delay=2)
 
-    # 最終驗證：核准/駁回按鈕應已消失
     for attempt in range(3):
         n = _nomad_button_count()
         if n <= 1:
-            # n=0 可能是 Wrong Password 對話框擋住了按鈕，不能直接算通過
             xml = dump_ui()
             if 'Wrong Password' in xml or 'Notes ID Password' in xml or 'Notes ID password' in xml:
-                print("    ✗ 偵測到密碼相關對話框（n=0 不代表核准成功）", flush=True)
+                print("    ✗ 偵測到密碼相關對話框", flush=True)
                 _tap_text(xml, "OK", delay=1)
                 raise PasswordError("核准時仍顯示密碼錯誤對話框")
             print(f"    核准驗證通過（按鈕列剩 {n} 個按鈕）", flush=True)
             return "approved"
-        print(f"    [verify] 按鈕列仍有 {n} 個按鈕，等 2 秒再確認...", flush=True)
+        print(f"    [verify] 按鈕列仍有 {n} 個按鈕，等 2 秒...", flush=True)
         time.sleep(2)
 
     print("    ⚠️ 核准後按鈕列仍有核准按鈕，標記 approve_failed", flush=True)
@@ -968,10 +707,7 @@ def do_approve(buttons):
 
 
 def do_leave(buttons):
-    """
-    已核准或通知，點 Nomad 離開按鈕回到 Verse
-    buttons: find_nomad_buttons() 的回傳值
-    """
+    """點 Nomad 離開按鈕（通知信或已核准表單）。"""
     leave_coord = buttons.get("leave") or COORD["nomad_leave_fb"]
     print(f"    點離開 {leave_coord}...", flush=True)
     tap(*leave_coord, delay=2)
@@ -979,220 +715,271 @@ def do_leave(buttons):
 
 
 def back_to_unsigned():
-    """從 Nomad 表單回到 Unsigned 列表（狀態感知，避免多餘的 press_back）"""
+    """從 Nomad 表單回到 Unsigned 列表。"""
     time.sleep(1)
-    # 若已在 Unsigned 列表就不按 Back（Nomad 直接返回 Unsigned 的情況）
     if not _in_unsigned_list():
         press_back(delay=2)
     navigate_to_unsigned()
-    time.sleep(2)  # 等 Unsigned 列表完全載入
+    time.sleep(2)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# 主函式（供 hcl_process_all.py 呼叫）
-# ════════════════════════════════════════════════════════════════════════════════
-
-def _process_one_email(cx, cy, subject_text, count, review_only):
-    """
-    處理單封信件：開表單 → 截圖 → 核准/離開。
-    回傳 (status, screenshot_path, screenshot_path_b)。
-    """
-    # 從主旨判斷是待簽核還是通知
-    is_notif = "通知" in subject_text and "已核准" not in subject_text and "已批准" not in subject_text
-
-    # 從主旨判斷表單類型 → 取預設按鈕座標
-    form_type = get_form_type(subject_text)
+def _get_buttons_for(subject, is_notif=False):
+    """根據主旨取按鈕座標（優先用預設值，取不到再動態偵測）。"""
+    form_type = get_form_type(subject)
     if form_type:
-        print(f"    表單類型：{form_type}（使用預設座標）", flush=True)
-        preset_buttons = FORM_BUTTONS[form_type]
-    else:
-        preset_buttons = None
+        preset = FORM_BUTTONS[form_type]
+        return {
+            "leave":   preset["leave"],
+            "approve": None if is_notif else preset["approve"],
+        }
+    return find_nomad_buttons()
 
-    # 開啟 Nomad 表單
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Phase 2a — 截圖（不核准）
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _screenshot_one_email(cx, cy, subject, count):
+    """
+    開啟表單 → 截圖所有頁面 → 離開回 Unsigned（不核准）。
+    回傳截圖路徑清單。
+    """
     open_nomad_form(cx, cy)
 
-    # 取按鈕座標
-    if preset_buttons:
-        buttons = {"leave": preset_buttons["leave"],
-                   "approve": None if is_notif else preset_buttons["approve"]}
-    else:
-        buttons = find_nomad_buttons()
-
-    has_approve = buttons.get("approve") is not None
-
-    # 截圖前先收鍵盤（只在鍵盤確實顯示時才送 BACK，避免誤關表單）
+    # 收鍵盤（comment 欄位 auto-focus 會彈鍵盤蓋住表單）
     ime_status = adb("shell", "dumpsys", "input_method")
     if "mInputShown=true" in ime_status:
         adb("shell", "input", "keyevent", "4")
         time.sleep(1.0)
 
-    # 逐頁截圖直到到底，確保完整捕捉事由 / 外出地點 / 日期等所有欄位（改善 #9）
-    # v1.3.1：傳入該表單類型的必要欄位 list，每張截圖 OCR 驗證涵蓋率，
-    # 收齊或確認到底才停（通知信無 form_type → 不驗證，沿用 hash 邏輯）
-    required_fields = FORM_REQUIRED_FIELDS.get(form_type) if not is_notif else None
-    screenshots = capture_full_form(count, required_fields=required_fields)
+    screenshots = capture_full_form(count)
 
-    if review_only:
-        # 審查模式：只截圖不核准，離開表單（改善 #8）
-        do_leave(buttons)
-        status = "reviewed" if has_approve and not is_notif else ("notification" if is_notif else "already_approved")
-    elif is_notif or not has_approve:
-        status = do_leave(buttons)
-        if is_notif:
-            status = "notification"
-    else:
-        status = do_approve(buttons)
+    # 離開表單（不核准）
+    buttons = _get_buttons_for(subject, is_notif=True)  # is_notif=True → approve=None
+    do_leave(buttons)
 
-    return status, screenshots
+    return screenshots
 
 
-def phase2_approve_android(pending_items, ai_judge_fn=None, check_leftover=False, review_only=False):
+def phase2a_screenshot_all(subject_filter=None):
     """
-    Android 版 Phase 2：透過 ADB 操作 Android 模擬器。
+    Phase 2a：逐封開啟 Unsigned 信件，截圖後回到 Unsigned（不核准）。
 
-    參數：
-      pending_items  — Phase 1 回傳的清單 [{category, sender, subject}, ...]
-      ai_judge_fn    — 可選，接受截圖路徑並回傳 (has_approve: bool, detail: dict) 的函式
-                       若不傳入，預設直接執行核准（不讀取詳細內容）
-      check_leftover — Phase 1 掃到 0 筆時仍檢查 Unsigned 是否有遺留信件（改善 #1）
-      review_only    — 審查模式：只開表單截圖、不核准，信件留在 Unsigned（改善 #8）
+    subject_filter: 若指定（set of str），只處理這些主旨（retry 用）；
+                    None 表示處理所有 Unsigned 中的信件。
 
-    回傳：results list，格式與舊版相同：
-      [{sender, subject, status, detail}, ...]
+    輸出：hcl_screenshots.json（追加模式：既有截圖不覆蓋，新增或更新）
+    回傳 [{subject, screenshots: [paths]}]
     """
-    print("\n═══ Phase 2 (Android)：核准表單 ═══", flush=True)
-    if review_only:
-        print("  ⚠️ 審查模式：只截圖、不核准", flush=True)
+    print("\n═══ Phase 2a：截圖所有表單 ═══", flush=True)
+    if subject_filter:
+        print(f"  （retry 模式：只處理 {len(subject_filter)} 封）", flush=True)
 
-    # 前置檢查：密碼必須設定才能操作 Nomad
-    if not review_only and not NOTES_PASSWORD:
-        print("  ✗ HCL_NOTES_PASSWORD 未設定，無法執行核准", flush=True)
-        print("  請在 ~/.hermes/.env 加入一行：HCL_NOTES_PASSWORD=你的密碼", flush=True)
+    if not NOTES_PASSWORD:
+        print("  ✗ HCL_NOTES_PASSWORD 未設定，無法操作 Nomad", flush=True)
         return []
 
-    pending         = [x for x in pending_items if x.get("category") == "待簽核"]
-    notifs          = [x for x in pending_items if x.get("category") == "通知"]
-    approved_notifs = [x for x in pending_items if x.get("category") == "核准通知"]
+    # 讀取既有截圖結果（retry 時保留已完成的）
+    screenshots_path = os.path.join(_TMP, "hcl_screenshots.json")
+    existing = {}
+    if os.path.exists(screenshots_path) and subject_filter:
+        with open(screenshots_path) as f:
+            for item in json.load(f):
+                existing[item["subject"]] = item
 
-    print(f"  共 {len(pending)} 筆待簽核 / {len(notifs)} 筆通知 / {len(approved_notifs)} 筆核准通知", flush=True)
+    launch_verse()
+    ensure_clean_state()
+    navigate_to_unsigned()
+    time.sleep(2)
+    sync_now()
+    ensure_clean_state()
+    navigate_to_unsigned()
+    time.sleep(2)
+
+    processed = {}
+    results_map = dict(existing)  # subject → {subject, screenshots}
+    count = len(existing)
+
+    while True:
+        next_email = find_next_email(processed, subject_filter=subject_filter)
+        if not next_email:
+            break
+
+        cx, cy, subject = next_email
+        count += 1
+        print(f"\n  [{count}] {subject[:50]}", flush=True)
+
+        try:
+            screenshots = _screenshot_one_email(cx, cy, subject, count)
+            results_map[subject] = {"subject": subject, "screenshots": screenshots}
+            print(f"    → {len(screenshots)} 張截圖", flush=True)
+        except PasswordError as e:
+            print(f"    ✗ 密碼錯誤，停止：{e}", flush=True)
+            results_map[subject] = {"subject": subject, "screenshots": [], "error": "password_error"}
+            break
+        except Exception as e:
+            print(f"    ✗ 失敗：{e}", flush=True)
+            results_map[subject] = {"subject": subject, "screenshots": [], "error": str(e)}
+            try:
+                ensure_clean_state()
+            except Exception:
+                pass
+
+        processed[subject] = processed.get(subject, 0) + 1
+
+        try:
+            back_to_unsigned()
+        except Exception as e:
+            print(f"    ⚠️ 返回 Unsigned 失敗：{e}", flush=True)
+            launch_verse()
+            ensure_clean_state()
+            navigate_to_unsigned()
+        time.sleep(1)
+
+    results = list(results_map.values())
+
+    with open(screenshots_path, "w") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+
+    print(f"\n  Phase 2a 完成：共 {len(results)} 封截圖", flush=True)
+    return results
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Phase 2b — 核准（讀取 hcl_verified.json）
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _approve_one_email(cx, cy, subject):
+    """
+    開啟表單 → 核准（或對通知信點離開）。
+    回傳 status string。
+    """
+    is_notif = "通知" in subject
+    open_nomad_form(cx, cy)
+
+    buttons = _get_buttons_for(subject, is_notif=is_notif)
+    has_approve = buttons.get("approve") is not None
+
+    if is_notif or not has_approve:
+        do_leave(buttons)
+        return "notification" if is_notif else "already_approved"
+    else:
+        return do_approve(buttons)
+
+
+def phase2b_approve_verified():
+    """
+    Phase 2b：讀取 hcl_verified.json，核准已驗證的信件，跳過未驗證的。
+    輸出：hcl_approve_results.json
+    回傳 [{subject, status}]
+    """
+    print("\n═══ Phase 2b：核准已驗證的表單 ═══", flush=True)
+
+    if not NOTES_PASSWORD:
+        print("  ✗ HCL_NOTES_PASSWORD 未設定，無法執行核准", flush=True)
+        return []
+
+    verified_path = os.path.join(_TMP, "hcl_verified.json")
+    if not os.path.exists(verified_path):
+        print("  找不到 hcl_verified.json，請先由 Claude skill 層寫入", flush=True)
+        return []
+
+    with open(verified_path, encoding='utf-8') as f:
+        verified_list = json.load(f)
+
+    approved_subjects = {v["subject"] for v in verified_list if v.get("ok")}
+    skipped_subjects  = {v["subject"] for v in verified_list if not v.get("ok")}
+
+    print(f"  已驗證 {len(approved_subjects)} 封，跳過 {len(skipped_subjects)} 封", flush=True)
+    if skipped_subjects:
+        print("  ⚠️ 以下信件截圖欄位不完整，已跳過（保留在 Unsigned）：", flush=True)
+        for s in skipped_subjects:
+            print(f"    - {s}", flush=True)
 
     results = []
 
-    if pending or notifs or check_leftover:
-        expected_count = len(pending) + len(notifs)
-
-        # 清除上次執行遺留的截圖（改善 #7）
-        clear_stale_screenshots()
-
-        # 啟動 Verse → 清狀態 → 導航到 Unsigned → 下拉同步 → 確認數量
+    if approved_subjects:
         launch_verse()
         ensure_clean_state()
-        email_list = force_sync_unsigned(expected_count)
+        navigate_to_unsigned()
+        time.sleep(2)
 
-        if expected_count == 0 and not email_list:
-            print("  Unsigned 沒有遺留信件，跳過 Phase 2", flush=True)
-            return results
-        if expected_count == 0 and email_list:
-            print(f"  ⚠️ 發現 {len(email_list)} 封遺留信件（前次執行未完成），繼續處理", flush=True)
-
-        print(f"  Unsigned 資料夾確認 {len(email_list)} 封信件", flush=True)
-        for i, (cx, cy, text) in enumerate(email_list):
-            print(f"    [{i+1}] ({cx},{cy}) {text[:40]}", flush=True)
-
-        # ── 逐一處理 Unsigned 裡的信件（動態掃描 + 已處理計數 dict）──────────
-        processed = {}  # {subject: 已處理封數}（改善 #5：支援同主旨多封）
-        total = max(expected_count, len(email_list))
-        count = 0
+        processed = {}
 
         while True:
-            next_email = find_next_email(processed)
+            next_email = find_next_email(processed, subject_filter=approved_subjects)
             if not next_email:
-                print("  沒有更多未處理信件", flush=True)
                 break
 
-            cx, cy, subject_text = next_email
-            count += 1
-            print(f"\n  [{count}/{total}] ({cx},{cy}) {subject_text[:40]}", flush=True)
+            cx, cy, subject = next_email
+            print(f"\n  {subject[:50]}", flush=True)
 
-            # 單封例外保護：一封失敗不中斷整個流程（改善 #4）
-            screenshots = []
             try:
-                status, screenshots = _process_one_email(
-                    cx, cy, subject_text, count, review_only)
+                status = _approve_one_email(cx, cy, subject)
             except PasswordError as e:
-                print(f"    ✗ 密碼錯誤，中止批次處理：{e}", flush=True)
-                status = "password_error"
-                results.append({
-                    "sender":      "",
-                    "subject":     subject_text,
-                    "status":      status,
-                    "screenshots": [],
-                    "screenshot":  None,
-                    "screenshot_b": None,
-                })
-                processed[subject_text] = processed.get(subject_text, 0) + 1
-                try:
-                    ensure_clean_state()
-                except Exception:
-                    pass
-                print("  密碼錯誤無法繼續，停止處理剩餘信件", flush=True)
+                print(f"    ✗ 密碼錯誤，停止：{e}", flush=True)
+                results.append({"subject": subject, "status": "password_error"})
                 break
             except Exception as e:
-                print(f"    ✗ 處理失敗：{e}", flush=True)
+                print(f"    ✗ 失敗：{e}", flush=True)
                 status = "error"
                 try:
                     ensure_clean_state()
                 except Exception:
                     pass
 
-            processed[subject_text] = processed.get(subject_text, 0) + 1
-            results.append({
-                "sender":      "",
-                "subject":     subject_text,
-                "status":      status,
-                "screenshots": screenshots,                          # 完整截圖列表（改善 #9）
-                "screenshot":  screenshots[0] if screenshots else None,   # 向後相容
-                "screenshot_b": screenshots[-1] if len(screenshots) > 1 else (screenshots[0] if screenshots else None),
-            })
+            processed[subject] = processed.get(subject, 0) + 1
+            results.append({"subject": subject, "status": status})
             print(f"    → {status}", flush=True)
 
             try:
                 back_to_unsigned()
             except Exception as e:
-                print(f"    ⚠️ 返回 Unsigned 失敗：{e}，嘗試重啟 Verse", flush=True)
+                print(f"    ⚠️ 返回 Unsigned 失敗：{e}", flush=True)
                 launch_verse()
                 ensure_clean_state()
                 navigate_to_unsigned()
             time.sleep(1)
 
-    # ── 核准通知（不需要 Android 操作）──────────────────────────────────────
-    for item in approved_notifs:
-        results.append({
-            "sender":  item.get("sender", ""),
-            "subject": item.get("subject", ""),
-            "status":  "approved_notification",
-            "detail":  None,
-        })
+    # 跳過的信件也加入結果（status=screenshot_failed）
+    for subject in skipped_subjects:
+        results.append({"subject": subject, "status": "screenshot_failed"})
 
+    with open(os.path.join(_TMP, "hcl_approve_results.json"), "w") as f:
+        json.dump({"total": len(results), "results": results}, f, ensure_ascii=False, indent=2)
+
+    print(f"\n  Phase 2b 完成：{len(results)} 封處理完畢", flush=True)
     return results
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 單機執行（測試用）
+# 主程式
 # ════════════════════════════════════════════════════════════════════════════════
 
+def main():
+    if "--screenshot-only" in sys.argv:
+        # retry 模式：若有 hcl_retry_subjects.json，只處理指定主旨
+        retry_path = os.path.join(_TMP, "hcl_retry_subjects.json")
+        subject_filter = None
+        if os.path.exists(retry_path):
+            with open(retry_path) as f:
+                subjects = json.load(f)
+            if subjects:
+                subject_filter = set(subjects)
+                print(f"  retry 模式：{len(subject_filter)} 封需重新截圖", flush=True)
+
+        # 首次執行前清除舊截圖（retry 時保留，由 phase2a 內部合併）
+        if subject_filter is None:
+            clear_stale_screenshots()
+
+        phase2a_screenshot_all(subject_filter=subject_filter)
+
+    elif "--approve" in sys.argv:
+        phase2b_approve_verified()
+
+    else:
+        print("用法：hcl_approve_android.py --screenshot-only | --approve", flush=True)
+
+
 if __name__ == "__main__":
-    review_only = "--review" in sys.argv
-
-    pending = []
-    _scan_json = os.path.join(_TMP, "hcl_scan_results.json")
-    if os.path.exists(_scan_json):
-        with open(_scan_json) as f:
-            pending = json.load(f).get("pending", [])
-
-    results = phase2_approve_android(pending, check_leftover=not pending,
-                                     review_only=review_only)
-    output = {"total": len(results), "results": results}
-    with open(os.path.join(_TMP, "hcl_approve_results.json"), "w") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+    main()
