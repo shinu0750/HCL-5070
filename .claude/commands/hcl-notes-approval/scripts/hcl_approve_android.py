@@ -827,7 +827,17 @@ def phase2a_screenshot_all(subject_filter=None):
 
     processed = {}
     results_map = dict(existing)  # subject → {subject, screenshots}
-    count = len(existing)
+    # 用既有截圖檔名中出現過的最大編號起算，而不是 len(existing)：
+    # 同一輪多次個別 retry 時，existing 筆數不變（更新既有 subject 的內容），
+    # 若用筆數當編號，兩次不同 subject 的 retry 會算出同一個編號，導致
+    # 後寫入的截圖檔案覆蓋掉前一個 subject 的檔案，兩個 subject 最後指向同一批
+    # 錯誤截圖（2026-07-02 案例：劉子瑜 2026/7/2 外出單被穆彥池外出單的截圖覆蓋）。
+    count = 0
+    for item in existing.values():
+        for p in item.get("screenshots", []):
+            m = re.search(r"nomad_form_(\d+)_", os.path.basename(p))
+            if m:
+                count = max(count, int(m.group(1)))
 
     while True:
         next_email = find_next_email(processed, subject_filter=subject_filter)
