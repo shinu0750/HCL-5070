@@ -149,10 +149,17 @@ def capture_full_form(count):
         return hashlib.md5(buf.getvalue()).hexdigest()
 
     # Step 1: 等待載入完成
+    # 密碼對話框有時在 open_nomad_form 檢查完之後才彈出（session 剛好在此時過期），
+    # 若不在這個迴圈裡持續偵測，會把對話框畫面當成「已載入」的表單內容截圖
+    # （2026-07-02 案例：穆彥池外出單 4 張截圖全部停在 Notes ID Password 畫面）。
     print("    等待表單載入...", flush=True)
     load_start = time.time()
     prev_load_hash = None
     while time.time() - load_start < 30:
+        if handle_notes_password_dialog():
+            load_start = time.time()
+            prev_load_hash = None
+            continue
         tmp_path = os.path.join(_TMP, "nomad_load_check.png")
         screenshot_to_file(tmp_path)
         load_hash = content_hash(tmp_path)
@@ -623,7 +630,7 @@ def _find_link_bounds():
     return None
 
 
-def _find_attach_icon_bounds(retry=6, delay=1.0):
+def _find_attach_icon_bounds(retry=15, delay=1.0):
     """
     尋找信件內文附件圖示節點：content-desc="Open link in HCL Notes (Document Link)"，
     這是 Verse 內文 WebView 對附件圖示的語意標籤，比用 'Link' 文字位置推算偏移量準確。
@@ -632,6 +639,10 @@ def _find_attach_icon_bounds(retry=6, delay=1.0):
     暫時性 bounds（例如 [529,576][611,576]，y1==y2），此時算出的座標不可信。
     這裡重試等待 bounds 收斂成非零高度才回傳（2026-07-02 案例：同一封信連續兩次
     dump 都撈到零高度 bounds，改點算出的座標完全點不中任何東西）。
+
+    retry=15（約 15 秒）：實測同一批信件中 WebView 渲染時間落差很大，
+    有的 3~4 秒就緒、有的需要 14 秒以上（伺服器回應速度或裝置負載影響），
+    重試次數太少會在正常情況下也誤判為「找不到」。
     """
     pattern = re.compile(
         r'content-desc="Open link in HCL Notes \(Document Link\)"'
