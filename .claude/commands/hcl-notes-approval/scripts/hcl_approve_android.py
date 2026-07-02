@@ -614,7 +614,7 @@ def _open_nomad_from_chrome_url():
 
 
 def _find_link_bounds():
-    """尋找信件內文 'Link' 超連結節點的 bounds，用來回推左側附件圖示座標。"""
+    """尋找信件內文 'Link' 超連結節點的 bounds。"""
     xml = dump_ui()
     m = re.search(
         r'(?:text|content-desc)="Link"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
@@ -623,34 +623,52 @@ def _find_link_bounds():
     return None
 
 
+def _find_attach_icon_bounds(retry=6, delay=1.0):
+    """
+    尋找信件內文附件圖示節點：content-desc="Open link in HCL Notes (Document Link)"，
+    這是 Verse 內文 WebView 對附件圖示的語意標籤，比用 'Link' 文字位置推算偏移量準確。
+
+    剛點開信件時 WebView 常常還沒 layout 完成，uiautomator dump 會量到高度為 0 的
+    暫時性 bounds（例如 [529,576][611,576]，y1==y2），此時算出的座標不可信。
+    這裡重試等待 bounds 收斂成非零高度才回傳（2026-07-02 案例：同一封信連續兩次
+    dump 都撈到零高度 bounds，改點算出的座標完全點不中任何東西）。
+    """
+    pattern = re.compile(
+        r'content-desc="Open link in HCL Notes \(Document Link\)"'
+        r'[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"'
+    )
+    for _ in range(retry):
+        xml = dump_ui()
+        m = pattern.search(xml)
+        if m:
+            x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
+            if y2 > y1 and x2 > x1:
+                return (x1, y1, x2, y2)
+        time.sleep(delay)
+    return None
+
+
 def open_nomad_form(email_cx, email_cy):
     """點開信件 → 點附件圖示開啟 Nomad，處理密碼對話框與各種 fallback。"""
     print(f"    點開信件 ({email_cx}, {email_cy})", flush=True)
     tap(email_cx, email_cy, delay=2.5)
-    print(f"    點附件圖示 {COORD['attach_icon']}", flush=True)
-    tap(*COORD["attach_icon"], delay=5)
+
+    # 優先用附件圖示的語意標籤動態定位，比固定座標或由 Link 位置推算偏移量準確，
+    # 且內建等待 WebView layout 完成的重試機制。
+    icon_bounds = _find_attach_icon_bounds()
+    if icon_bounds:
+        x1, y1, x2, y2 = icon_bounds
+        icon_x, icon_y = (x1 + x2) // 2, (y1 + y2) // 2
+        print(f"    點附件圖示（動態定位 {icon_bounds}） ({icon_x}, {icon_y})", flush=True)
+        tap(icon_x, icon_y, delay=5)
+    else:
+        print(f"    找不到附件圖示節點，改點固定座標 {COORD['attach_icon']}", flush=True)
+        tap(*COORD["attach_icon"], delay=5)
     handle_notes_password_dialog()
 
     pkg = _current_foreground_pkg()
     if "nomad" in pkg.lower():
         return
-
-    # 固定座標打不中：信件內文行數不同（例如通知信正文較短）會讓圖示的實際 y 座標
-    # 偏離固定值。改用內文中 'Link' 超連結節點的位置往左推算圖示座標再點一次，
-    # 比直接點 Link 文字可靠 —— Link 文字有時會被 Chrome 攔截導向網頁而非開啟 Nomad
-    # （2026-07-01 楊梓盛外出單通知信案例：固定座標與 Link 皆落空，最終手動確認
-    # 圖示實際位置在 Link 節點左側約 90px）。
-    link_bounds = _find_link_bounds()
-    if link_bounds:
-        x1, y1, x2, y2 = link_bounds
-        icon_x, icon_y = max(x1 - 90, 0), (y1 + y2) // 2
-        print(f"    ⚠️ 固定座標未進入 Nomad（前景：{pkg or '未知'}），"
-              f"依 Link 節點 {link_bounds} 改點左側附件圖示 ({icon_x}, {icon_y})", flush=True)
-        tap(icon_x, icon_y, delay=5)
-        handle_notes_password_dialog()
-        pkg = _current_foreground_pkg()
-        if "nomad" in pkg.lower():
-            return
 
     print(f"    ⚠️ 仍未進入 Nomad（前景：{pkg or '未知'}），嘗試點 Link 文字", flush=True)
     if _try_open_link_text():
