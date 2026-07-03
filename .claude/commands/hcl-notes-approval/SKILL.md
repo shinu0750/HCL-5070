@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.0.0
+version: 2.1.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -66,6 +66,15 @@ python hcl_approve_android.py --screenshot-only
 **retry 模式**（Claude skill 層寫入 `hcl_retry_subjects.json` 後重跑）：
 - 若 `hcl_retry_subjects.json` 存在，只重截其中指定的主旨
 - 已完成的截圖自動保留，合併輸出
+
+> ⚠️ **每次要對「一整批新信件」跑 `--screenshot-only` 前，必須先刪除 `hcl_retry_subjects.json`**：
+> 這個檔案只要還存在（例如上一輪 retry 用剩的），下一次呼叫就會被誤判成 retry 模式，
+> 只處理檔案裡指定的少數幾封，其餘新信件會被靜默跳過而不自知
+> （2026-07-03 案例：Phase 1 掃到 9 封新信，因為殘留的 retry 檔案只剩 1 個主旨，
+> 實際只截圖處理了 1 封，另外 8 封完全沒被觸碰）。
+> ```bash
+> rm -f "$TEMP/hcl_retry_subjects.json"
+> ```
 
 ---
 
@@ -130,6 +139,49 @@ python hcl_process_all.py --phase3
 - 其餘保留在 Unsigned
 
 > **注意**：HCL Nomad 核准後，Verse 端可能自動將信件移出 Unsigned，導致 Phase 3 回報「找不到」，此為正常現象。
+
+> ⚠️ **HCL 系統會對同一份文件持續發送多封重複的提醒信，這是正常現象、不是 bug**：
+> 同一個主旨（例如「李國訓的加班申請單，請簽核」）在 Unsigned 裡同時存在 2～4+ 份重複副本
+> 是常態。核准其中一份就等於核准了底層文件（其他副本會顯示「簽核完成」），但 Phase 3
+> 每次只會搜尋並移動「找到的第一份」，不會一次清掉所有重複副本。
+>
+> 因此 **Phase 3 跑完一次不代表 Unsigned 真的空了**，必須：
+> 1. 用 Playwright 重新查詢 Unsigned 目前實際剩幾筆（見下方「確認資料夾真實狀態」）
+> 2. 若不是 0 筆，針對剩餘主旨重跑 Phase 2a（截圖）→ 驗證 → Phase 2b（核准，通常顯示已核准只需離開）→ Phase 3
+> 3. 重複直到 Playwright 查詢結果確認為 0 筆
+>
+> 少數情況下同一主旨會反覆冒出「還有一份」持續好幾輪（可能是測試環境定期重新產生提醒信），
+> 若同一主旨重試 3～4 輪後仍有殘留、且每次都確認顯示「簽核完成」，可以視為底層文件已核准、
+> 停止追這份殘留副本，跟用戶說明即可，不需要無限循環處理。
+
+### 確認資料夾真實狀態：一律用 Playwright，不要看 Android UI
+
+Android 上的 Verse app 畫面**有快取延遲，不能拿來判斷資料夾目前的真實內容**——
+實測多次遇到 Android 畫面顯示一堆看似還在 Unsigned 的信件，但用 Playwright 重新登入
+查詢，發現伺服器端實際上已經移空或只剩少數幾筆。要確認 Unsigned／Sign 資料夾目前
+真正還有哪些信件時，一律用 Playwright 開瀏覽器查詢：
+
+```python
+import sys
+sys.path.insert(0, r".claude/commands/hcl-notes-approval/scripts")
+from playwright.sync_api import sync_playwright
+import hcl_process_all as m
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False, channel="msedge")
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900}, ignore_https_errors=True)
+    page = ctx.new_page()
+    page.set_default_timeout(60000)
+    m._login(page)
+    page.locator('[role="treeitem"]:has-text("Unsigned")').first.click()
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(1500)
+    results = m._scroll_and_collect_all(page)
+    print(f"Unsigned 實際還有 {len(results)} 筆")
+    browser.close()
+```
+
+Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆」。
 
 ---
 
@@ -209,6 +261,12 @@ python hcl_process_all.py --phase3
 
 ## Changelog
 
+- 2.1.0 (2026-07-03): 根據實戰經驗補三個易踩坑點
+  - Phase 2a：明確要求對新一批信件跑 `--screenshot-only` 前先刪除 `hcl_retry_subjects.json`，
+    否則會被誤判成 retry 模式，靜默漏掉大部分新信件
+  - Phase 3：說明 HCL 系統對同一份文件會重複發送多封提醒信是正常現象，Phase 3 一次只搬
+    一份，Unsigned 未必真的清空，需要用 Playwright 重新確認並視情況重跑到真正淨空為止
+  - 新增「確認資料夾真實狀態」說明：Android UI 有快取延遲不可信，一律用 Playwright 查詢
 - 2.0.0 (2026-07-03): 全面重構
   - Phase 1：移除分類邏輯，APPROVAL_KEYWORDS 符合的信件全移到 Unsigned
   - Phase 2 拆成 2a（截圖）和 2b（核准），中間由 Claude skill 層驗證欄位
