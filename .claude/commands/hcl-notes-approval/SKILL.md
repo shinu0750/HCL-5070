@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.1.0
+version: 2.2.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -20,6 +20,8 @@ version: 2.1.0
 - **Playwright**：Python 套件，用於 HCL Verse 網頁操作（Phase 1 & 3）
 - **Python 腳本目錄**：`.claude/commands/hcl-notes-approval/scripts/`
 - **環境變數**：`~/.hermes/.env`（含 HCL_USERNAME、HCL_PASSWORD、HCL_PORTAL_URL、HCL_VERSE_URL、HCL_NOTES_PASSWORD）
+- **Hindsight**（Phase 4 用）：自架服務，Windows 端連 `http://localhost:8888`（API）/
+  `http://localhost:9999`（Dashboard），無需登入驗證，不需要 MCP server
 
 ## 使用方式
 
@@ -187,16 +189,41 @@ Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆
 
 ### Phase 4：整理結果並寫入 Hindsight（skill 層執行）
 
-從 `hcl_verified.json` 的 `data` 欄位讀取已驗證的欄位資訊，整理成 Markdown 表格：
+從 `hcl_verified.json` 的 `data` 欄位讀取已驗證的欄位資訊。
 
-| 姓名 | 類型 | 日期 | 時間 | 事由 |
-|------|------|------|------|------|
-| 楊梓盛 | 外出申請 | 2026/07/01 | 12:00–13:00 | 覓食 |
-
-呼叫 `mcp__hindsight__sync_retain`：
-- bank：`shuhsing`
-- tag：`hcl-approval`、日期
-- 內容：表格 + 今日簽核摘要
+> ⚠️ **這台機器沒有 Hindsight 的 MCP server**（舊 macOS/Claude-5070 環境有裝，但沒帶過來）。
+> Hindsight 本身是自架在 WSL Docker 裡的服務（container: `hindsight`），Windows 端可直接
+> 連 `http://localhost:8888`、**不需要登入驗證**。不用等 MCP 補上，直接呼叫 REST API 即可：
+>
+> ```bash
+> python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json
+> ```
+>
+> `hcl_write_hindsight.py`（位於本 skill 的 `scripts/` 目錄）封裝了寫入邏輯，支援兩種模式：
+>
+> - **單筆模式**（`--content-file`）：整批摘要當一筆 memory，`timestamp` 預設為執行日
+> - **多筆模式**（`--items-file`，建議）：JSON 陣列，**每筆各自帶正確的實際發生時間**，
+>   讓 Hindsight 的時間軸準確反映每個表單的日期，而不是全部塞在處理當天
+>
+> `items.json` 範例（每筆 `content` 用自然語言描述，方便 Hindsight 做事實萃取；
+> `timestamp` 用 ISO 8601；`tags`/`document_id` 省略時會自動補上共用標籤與內容雜湊 id）：
+> ```json
+> [
+>   {
+>     "content": "楊梓盛（工號7922）外出申請已核准：LIMS現場勘查，地點永光二廠，時間 2026/07/02 09:00–17:00。",
+>     "timestamp": "2026-07-02T09:00:00"
+>   }
+> ]
+> ```
+>
+> **⚠️ 效能注意**：Hindsight 每筆 memory 都要跑一次 LLM 事實萃取，實測單筆約 20~30 秒。
+> 多筆一次送同步呼叫很容易超過 HTTP timeout，`hcl_write_hindsight.py` 內建用
+> `async=true` 送出後輪詢 `/operations` 端點直到完成，不需要自己處理逾時重試。
+>
+> 寫入目標：`shuhsing` bank，tags 固定帶 `hcl-approval` 與處理日期（例如 `2026-07-03`）。
+>
+> 如果之後這台機器裝了 Hindsight 的 MCP server，兩種方式（REST API 直連 / MCP 工具）
+> 效果等價，可以擇一使用，不需要互相取代。
 
 ---
 
@@ -261,6 +288,12 @@ Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆
 
 ## Changelog
 
+- 2.2.0 (2026-07-03): Phase 4 改用 REST API 直連 Hindsight，不再依賴 MCP
+  - 新增 `hcl_write_hindsight.py`：直接呼叫 `http://localhost:8888` 的 Hindsight REST API
+    寫入記憶，取代原本呼叫 `mcp__hindsight__sync_retain`（這台機器沒裝該 MCP server）
+  - 支援多筆模式，每筆可帶各自的實際發生 `timestamp`，不會全部塞在處理當天
+  - 因單筆 LLM 事實萃取約 20~30 秒，內建 `async=true` + 輪詢 operations 端點，避免逾時
+  - 「必要環境」補上 Hindsight 連線資訊
 - 2.1.0 (2026-07-03): 根據實戰經驗補三個易踩坑點
   - Phase 2a：明確要求對新一批信件跑 `--screenshot-only` 前先刪除 `hcl_retry_subjects.json`，
     否則會被誤判成 retry 模式，靜默漏掉大部分新信件
