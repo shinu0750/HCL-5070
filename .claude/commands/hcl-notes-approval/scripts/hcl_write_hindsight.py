@@ -88,7 +88,7 @@ def retain_async(bank_id, items):
 
 def main():
     parser = argparse.ArgumentParser(description="寫入 HCL 簽核記錄到 Hindsight")
-    parser.add_argument("--bank", default="shuhsing", help="Hindsight bank_id（預設 shuhsing）")
+    parser.add_argument("--bank", default="EID", help="Hindsight bank_id（預設 EID）")
     parser.add_argument("--date", required=True, help="處理日期，例如 2026-07-03，用來組共用 tag 與 fallback document_id")
     parser.add_argument("--tag", action="append", default=None, help="共用標籤，可重複指定")
     parser.add_argument("--content-file", help="單筆模式：內容檔案路徑（UTF-8 純文字/Markdown）")

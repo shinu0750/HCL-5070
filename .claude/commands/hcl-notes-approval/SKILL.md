@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.2.0
+version: 2.2.1
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -220,7 +220,9 @@ Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆
 > 多筆一次送同步呼叫很容易超過 HTTP timeout，`hcl_write_hindsight.py` 內建用
 > `async=true` 送出後輪詢 `/operations` 端點直到完成，不需要自己處理逾時重試。
 >
-> 寫入目標：`shuhsing` bank，tags 固定帶 `hcl-approval` 與處理日期（例如 `2026-07-03`）。
+> 寫入目標：`EID` bank（同一個 Hindsight instance 裡還有 `shuhsing` bank，**不要寫錯**——
+> 這兩個 bank 語意不同，`EID` 才是 HCL 簽核記錄該去的地方），tags 固定帶 `hcl-approval`
+> 與處理日期（例如 `2026-07-03`）。
 >
 > 如果之後這台機器裝了 Hindsight 的 MCP server，兩種方式（REST API 直連 / MCP 工具）
 > 效果等價，可以擇一使用，不需要互相取代。
@@ -288,6 +290,10 @@ Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆
 
 ## Changelog
 
+- 2.2.1 (2026-07-04): 修正 Hindsight 寫入目標 bank
+  - 正確的寫入目標是 `EID` bank，不是 `shuhsing`（兩個 bank 語意不同）
+  - `hcl_write_hindsight.py` 的 `--bank` 預設值改為 `EID`
+  - 修正前已誤寫入 `shuhsing` 的 10~11 筆測試記錄已刪除清乾淨
 - 2.2.0 (2026-07-03): Phase 4 改用 REST API 直連 Hindsight，不再依賴 MCP
   - 新增 `hcl_write_hindsight.py`：直接呼叫 `http://localhost:8888` 的 Hindsight REST API
     寫入記憶，取代原本呼叫 `mcp__hindsight__sync_retain`（這台機器沒裝該 MCP server）
