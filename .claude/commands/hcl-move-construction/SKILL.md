@@ -4,7 +4,7 @@ description: >
   HCL Verse 入廠施工信件歸檔自動化。當用戶提到入廠施工、施工通知、
   施工信件歸檔、把入廠施工移到 other、整理施工信件時使用此 skill。
   自動掃描收件匣找出所有符合關鍵字的信件（含討論串），逐一移到「other」資料匣。
-version: 1.2.5
+version: 1.2.6
 ---
 
 # HCL Verse 入廠施工信件歸檔
@@ -53,7 +53,7 @@ python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-move-con
 呈現結果後，呼叫 `mcp__hindsight__sync_retain` 將本次執行摘要寫入 Hindsight：
 
 - content：包含執行日期、移動封數、移動信件清單（寄件者 / 主旨）
-- bank：`shuhsing`
+- bank：`EID`
 - metadata：`{"type": "hcl_move_construction", "date": "YYYY-MM-DD"}`
 
 範例內容：
@@ -90,6 +90,8 @@ python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-move-con
 
 ## Changelog
 
+- 1.2.6 (2026-07-05): Hindsight 寫入目標 bank 由 `shuhsing` 改為 `EID`，與其他 HCL skill
+  （如 hcl-notes-approval）的 bank 慣例保持一致。
 - 1.2.5 (2026-07-05): 目標資料夾改名 `05Other` → `other`（使用者於 Verse 端重新命名資料夾）。
   更新 `TARGET_FOLDER` 常數與本文件所有引用，修正因資料夾改名導致的 `error_popup_stuck`
   （搜尋 popup 找不到符合「05Other」的項目，Enter 也無法關閉 popup）。
