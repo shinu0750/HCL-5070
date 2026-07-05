@@ -2,14 +2,14 @@
 name: hcl-move-construction
 description: >
   HCL Verse 入廠施工信件歸檔自動化。當用戶提到入廠施工、施工通知、
-  施工信件歸檔、把入廠施工移到 05Other、整理施工信件時使用此 skill。
-  自動掃描收件匣找出所有符合關鍵字的信件（含討論串），逐一移到「05Other」資料匣。
-version: 1.2.4
+  施工信件歸檔、把入廠施工移到 other、整理施工信件時使用此 skill。
+  自動掃描收件匣找出所有符合關鍵字的信件（含討論串），逐一移到「other」資料匣。
+version: 1.2.5
 ---
 
 # HCL Verse 入廠施工信件歸檔
 
-自動將收件匣中所有符合關鍵字的信件（含討論串）移到「05Other」資料匣。
+自動將收件匣中所有符合關鍵字的信件（含討論串）移到「other」資料匣。
 
 ## 搜尋關鍵字
 
@@ -26,14 +26,16 @@ version: 1.2.4
 直接執行腳本：
 
 ```bash
-python3 ~/.claude/skills/hcl-move-construction/hcl_move_construction.py
+python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-move-construction\hcl_move_construction.py"
 ```
+
+（Windows 環境用 `python`，非 `python3`；PowerShell 下請用此路徑，非 `~/.claude/skills/...`）
 
 腳本會：
 1. 登入 HCL Verse（憑證來自 `~/.hermes/.env`）
 2. 從頂部逐頁捲動掃描收件匣（兼容 virtual scroll，120 封以上 inbox 不會漏掃）
 3. 累積去重所有符合關鍵字的 treeitem（含計數 > 1 的討論串）
-4. 逐一點擊 → 點資料夾 icon → 輸入 `05Other` → 移動
+4. 逐一點擊 → 點資料夾 icon → 輸入 `other` → 移動
 5. 輸出結果到 `/tmp/hcl_move_construction.json`
 
 ## 結果呈現
@@ -57,7 +59,7 @@ python3 ~/.claude/skills/hcl-move-construction/hcl_move_construction.py
 範例內容：
 ```
 2026-05-30 入廠施工信件歸檔
-移動 2 封到 05Other：
+移動 2 封到 other：
 - 呂晉安 / 2026/6/1 (一) 鎧詮入廠施工 A 組...
 - 呂晉安 / 2026/6/1 (一) 汎太宇入廠施工 7人...
 ```
@@ -88,6 +90,9 @@ python3 ~/.claude/skills/hcl-move-construction/hcl_move_construction.py
 
 ## Changelog
 
+- 1.2.5 (2026-07-05): 目標資料夾改名 `05Other` → `other`（使用者於 Verse 端重新命名資料夾）。
+  更新 `TARGET_FOLDER` 常數與本文件所有引用，修正因資料夾改名導致的 `error_popup_stuck`
+  （搜尋 popup 找不到符合「05Other」的項目，Enter 也無法關閉 popup）。
 - 1.2.4 (2026-06-10): 修正討論串移動失敗 — 討論串的資料夾 icon 在
   `div.sticky-header > div > button` 路徑下（沒有 `action-bar` class），
   舊 selector 只比對單封信版本，導致回報 `error_no_button`。
