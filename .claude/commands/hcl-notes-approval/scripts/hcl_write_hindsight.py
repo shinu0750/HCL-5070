@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 HCL Notes 簽核記錄寫入 Hindsight — REST API 直連（不透過 MCP）
+寫入成功後可選擇再通知 Google Chat（透過 n8n webhook 轉發）。
 
 Hindsight 是自架在 WSL Docker 裡的服務（container: hindsight），
 Windows 端可直接連 http://localhost:8888，無需登入驗證。
@@ -19,6 +20,13 @@ Windows 端可直接連 http://localhost:8888，無需登入驗證。
      ...
    ]
    每筆的 tags/document_id 若省略，會自動補上 --tag 指定的共用標籤與依 content 雜湊產生的 document_id。
+
+寫完 Hindsight 後通知 Google Chat（選用，加 --notify-file）：
+   python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify-file summary_table.md
+
+   Hindsight 寫入全部成功後，會把 --notify-file 的內容原封不動 POST 到 n8n workflow
+   「[HCL] 簽核完成通知 -> Google Chat」的 webhook，轉發到 Hermes bot 的 Google Chat
+   私訊（1 對 1 DM，只有使用者看得到）。若 Hindsight 寫入失敗則不會發送通知。
 """
 
 import argparse
@@ -33,6 +41,17 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 HINDSIGHT_BASE = "http://localhost:8888"
+N8N_NOTIFY_WEBHOOK = "http://10.11.1.59:5678/webhook/hcl-approval-notify"
+
+
+def notify_google_chat(text, webhook=N8N_NOTIFY_WEBHOOK):
+    """把 text 原封不動 POST 給 n8n webhook，轉發到 Google Chat。"""
+    body = json.dumps({"text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def _post(url, body, timeout=30):
@@ -93,6 +112,7 @@ def main():
     parser.add_argument("--tag", action="append", default=None, help="共用標籤，可重複指定")
     parser.add_argument("--content-file", help="單筆模式：內容檔案路徑（UTF-8 純文字/Markdown）")
     parser.add_argument("--items-file", help="多筆模式：JSON 陣列檔案路徑，每筆可帶自己的 timestamp")
+    parser.add_argument("--notify-file", help="Hindsight 寫入成功後，把此檔案內容原封不動發送到 Google Chat")
     args = parser.parse_args()
 
     if not args.content_file and not args.items_file:
@@ -135,6 +155,22 @@ def main():
         sys.exit(1)
 
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+
+    operations = result.get("operations", {}) if isinstance(result, dict) else {}
+    all_ok = all(op.get("status") == "completed" for op in operations.values()) if operations else True
+
+    if args.notify_file:
+        if not all_ok:
+            print("  ⚠️ Hindsight 寫入未全部成功，略過 Google Chat 通知", flush=True)
+        else:
+            with open(args.notify_file, encoding="utf-8") as f:
+                notify_text = f.read()
+            print(f"  通知 Google Chat（webhook: {N8N_NOTIFY_WEBHOOK}）...", flush=True)
+            try:
+                notify_result = notify_google_chat(notify_text)
+                print(f"    -> {notify_result}", flush=True)
+            except urllib.error.URLError as e:
+                print(f"  ⚠️ Google Chat 通知失敗（Hindsight 已寫入成功，不影響資料）：{e}", flush=True)
 
 
 if __name__ == "__main__":

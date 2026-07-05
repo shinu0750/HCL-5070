@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.2.1
+version: 2.3.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -229,6 +229,39 @@ Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆
 
 ---
 
+### Phase 5：Hindsight 寫入成功後通知 Google Chat（選用）
+
+Hindsight 全部寫入成功後，把 Phase 4 用的 Markdown 表格摘要發送到使用者的 Google Chat
+（透過 Hermes bot 的 1 對 1 DM，只有使用者看得到，不會被其他人看到）：
+
+```bash
+python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify-file summary_table.md
+```
+
+`--notify-file` 指向的檔案內容（建議用 Phase 4 那份 Markdown 表格）會**原封不動**當作
+`{"text": "..."}` POST 到 n8n workflow **「[HCL] 簽核完成通知 -> Google Chat」**
+（workflow id `sP8hjVz2rl5w7IqC`，webhook path `hcl-approval-notify`）：
+
+```
+POST http://10.11.1.59:5678/webhook/hcl-approval-notify
+Content-Type: application/json
+
+{"text": "<Markdown 表格內容>"}
+```
+
+n8n 端只有兩個節點：Webhook → Google Chat 節點（`serviceAccount` 認證，沿用 Hermes
+既有的 Google Chat Space `spaces/h2YgpyAAAAE`），收到 `body.text` 後直接轉發，不做任何
+格式轉換。
+
+> **只在 Hindsight 全部寫入成功時才發通知**：`hcl_write_hindsight.py` 會檢查所有
+> operations 的狀態，只要有任何一筆不是 `completed`，就跳過 Google Chat 通知並印出警告，
+> 避免「明明資料沒存好，卻通知說完成了」的誤導訊息。
+>
+> Google Chat 通知失敗（例如 n8n 或網路問題）不會讓整個腳本失敗——Hindsight 的資料已經
+> 寫入成功，通知只是錦上添花，失敗時印警告訊息即可，不用重試。
+
+---
+
 ## Android 操作座標（橫向 rotation=1，邏輯座標 2400×1080）
 
 ### Verse 導航
@@ -290,6 +323,12 @@ Android 畫面只用來實際操作核准動作，不用來判斷「還剩幾筆
 
 ## Changelog
 
+- 2.3.0 (2026-07-05): 新增 Phase 5 — Hindsight 寫入成功後通知 Google Chat
+  - 新建 n8n workflow「[HCL] 簽核完成通知 -> Google Chat」（id `sP8hjVz2rl5w7IqC`，
+    webhook path `hcl-approval-notify`），沿用 Hermes 既有的 Google Chat Service Account
+    與 Space，webhook 收到 `{"text": "..."}` 後原封不動轉發，不做格式轉換
+  - `hcl_write_hindsight.py` 新增 `--notify-file` 參數：Hindsight 全部寫入成功才發送通知，
+    避免資料沒存好卻誤報完成；Google Chat 通知失敗不影響 Hindsight 寫入結果
 - 2.2.1 (2026-07-04): 修正 Hindsight 寫入目標 bank
   - 正確的寫入目標是 `EID` bank，不是 `shuhsing`（兩個 bank 語意不同）
   - `hcl_write_hindsight.py` 的 `--bank` 預設值改為 `EID`
