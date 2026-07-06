@@ -14,7 +14,7 @@ import os, json, re, sys, tempfile
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-_env_path = os.path.expanduser("~/.hermes/.env")
+_env_path = os.path.expanduser(os.environ.get("HCL_ENV_FILE", "~/.hermes/.env"))
 if os.path.exists(_env_path):
     with open(_env_path) as f:
         for line in f:

@@ -21,12 +21,17 @@ Windows 端可直接連 http://localhost:8888，無需登入驗證。
    ]
    每筆的 tags/document_id 若省略，會自動補上 --tag 指定的共用標籤與依 content 雜湊產生的 document_id。
 
-寫完 Hindsight 後通知 Google Chat（選用，加 --notify-file）：
-   python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify-file summary_table.md
+寫完 Hindsight 後通知 Google Chat（選用，加 --notify-file + --space）：
+   python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify-file summary_table.md --space h2YgpyAAAAE
 
-   Hindsight 寫入全部成功後，會把 --notify-file 的內容原封不動 POST 到 n8n workflow
-   「[HCL] 簽核完成通知 -> Google Chat」的 webhook，轉發到 Hermes bot 的 Google Chat
-   私訊（1 對 1 DM，只有使用者看得到）。若 Hindsight 寫入失敗則不會發送通知。
+   Hindsight 寫入全部成功後，會把 --notify-file 的內容 POST 到 n8n workflow
+   「[HCL] 簽核完成通知 -> Google Chat」的 webhook，轉發到指定 space 的 Google Chat。
+   若 Hindsight 寫入失敗則不會發送通知。
+
+   ⚠️ --space 是必填（用 --notify-file 時）：n8n 端沒有預設值，每個使用者（包括自己）都要
+   明確帶自己的 space ID，不依賴任何隱式 fallback。代簽別人帳號時記得換成對方的 space
+   （見 hcl-notes-approval SKILL.md 的「使用者對照表」）：
+   python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify-file summary_table.md --space 8DyTYKAAAAE
 """
 
 import argparse
@@ -44,9 +49,11 @@ HINDSIGHT_BASE = "http://localhost:8888"
 N8N_NOTIFY_WEBHOOK = "http://10.11.1.59:5678/webhook/hcl-approval-notify"
 
 
-def notify_google_chat(text, webhook=N8N_NOTIFY_WEBHOOK):
-    """把 text 原封不動 POST 給 n8n webhook，轉發到 Google Chat。"""
-    body = json.dumps({"text": text}).encode("utf-8")
+def notify_google_chat(text, space, webhook=N8N_NOTIFY_WEBHOOK):
+    """把 text POST 給 n8n webhook，轉發到 Google Chat。space 必填——
+    n8n 端的 Google Chat 節點沒有預設值，沒帶 space 會直接在 Google Chat 那邊失敗。"""
+    payload = {"text": text, "space": space if space.startswith("spaces/") else f"spaces/{space}"}
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
@@ -113,10 +120,15 @@ def main():
     parser.add_argument("--content-file", help="單筆模式：內容檔案路徑（UTF-8 純文字/Markdown）")
     parser.add_argument("--items-file", help="多筆模式：JSON 陣列檔案路徑，每筆可帶自己的 timestamp")
     parser.add_argument("--notify-file", help="Hindsight 寫入成功後，把此檔案內容原封不動發送到 Google Chat")
+    parser.add_argument("--space", help="通知目標的 Google Chat space ID（例如 8DyTYKAAAAE 或 h2YgpyAAAAE）。用 --notify-file 時必填——n8n 端沒有預設值，每個使用者都要明確指定自己的 space")
     args = parser.parse_args()
 
     if not args.content_file and not args.items_file:
         print("  ✗ 必須指定 --content-file 或 --items-file 其中之一", flush=True)
+        sys.exit(1)
+
+    if args.notify_file and not args.space:
+        print("  ✗ 使用 --notify-file 時必須指定 --space（n8n 端沒有預設值，每個使用者都要明確指定）", flush=True)
         sys.exit(1)
 
     base_tags = ["hcl-approval", args.date]
@@ -165,9 +177,9 @@ def main():
         else:
             with open(args.notify_file, encoding="utf-8") as f:
                 notify_text = f.read()
-            print(f"  通知 Google Chat（webhook: {N8N_NOTIFY_WEBHOOK}）...", flush=True)
+            print(f"  通知 Google Chat（webhook: {N8N_NOTIFY_WEBHOOK}，space: {args.space}）...", flush=True)
             try:
-                notify_result = notify_google_chat(notify_text)
+                notify_result = notify_google_chat(notify_text, space=args.space)
                 print(f"    -> {notify_result}", flush=True)
             except urllib.error.URLError as e:
                 print(f"  ⚠️ Google Chat 通知失敗（Hindsight 已寫入成功，不影響資料）：{e}", flush=True)

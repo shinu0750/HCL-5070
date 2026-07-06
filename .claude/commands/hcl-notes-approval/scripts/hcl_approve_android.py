@@ -21,7 +21,7 @@ import base64, glob, json, os, re, subprocess, sys, tempfile, time
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
-_env_path = os.path.expanduser("~/.hermes/.env")
+_env_path = os.path.expanduser(os.environ.get("HCL_ENV_FILE", "~/.hermes/.env"))
 if os.path.exists(_env_path):
     with open(_env_path) as _f:
         for _line in _f:
@@ -30,7 +30,7 @@ if os.path.exists(_env_path):
                 _k, _, _v = _line.partition('=')
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-SERIAL         = "emulator-5554"
+SERIAL         = os.environ.get("HCL_ADB_SERIAL", "emulator-5554")
 # 與 hcl_process_all.py 保持一致
 APPROVAL_KEYWORDS = ["外出單", "加班申請", "未刷卡單", "外出單通知"]
 
@@ -1001,7 +1001,7 @@ def main():
         retry_path = os.path.join(_TMP, "hcl_retry_subjects.json")
         subject_filter = None
         if os.path.exists(retry_path):
-            with open(retry_path) as f:
+            with open(retry_path, encoding="utf-8") as f:
                 subjects = json.load(f)
             if subjects:
                 subject_filter = set(subjects)
