@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.8.0
+version: 2.9.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -396,6 +396,22 @@ Alert」的訊號，不是欄位真的缺失。
 
 ## Changelog
 
+- 2.9.0 (2026-07-07): 修正誤觸「已核准通知」畫面按鈕、意外取消外出單的嚴重 bug
+  - **事故**：`hcl_approve_android.py` 判斷「是否為純通知信」原本用
+    `is_notif = "通知" in subject`，但「XX的外出單已核准」這類通知信主旨不含
+    「通知」字面，被誤判成待核准表單，直接套用 `FORM_BUTTONS` 固定座標
+    (447,252) 當核准鈕去點。實際畫面在同一位置擺的其實是「外出單取消通知」
+    按鈕（已核准通知信跟待簽核表單的按鈕列完全不同），結果誤觸取消，
+    系統還真的寄出取消通知信給 HR（收件人 `[F1HR]`），內容是系統罐頭文字
+    「我已口頭取得主管同意」——不是使用者本人的陳述
+  - **修正**：新增 `_find_text_bounds()`，`_get_buttons_for()` 改為一律先讀
+    UI dump 確認畫面上真的有 `text="核准"` 節點才回傳核准鈕座標，找不到就只
+    會點「離開」——不再用主旨字串猜測畫面類型、也不再盲信 `FORM_BUTTONS`
+    固定座標一定對應「核准」語意。`_get_buttons_for` 移除 `is_notif` 參數，
+    Phase 2a/2b 呼叫處同步更新；`_approve_one_email` 的 `is_notif` 只保留用於
+    回傳狀態文字（`notification` vs `already_approved`），不再影響按哪個按鈕
+  - 這起事故沒有自動回復（HR 已收到取消通知信），需使用者自行決定是否要
+    重新提交外出單或跟 HR 說明；本次修正只處理程式邏輯，不動事故本身的資料
 - 2.8.0 (2026-07-06): 修正 `hcl_retry_subjects.json` 編碼不一致的 bug，補 tzuyu 帳號實戰踩坑點
   - `hcl_approve_android.py` 讀取 `hcl_retry_subjects.json` 改為明確指定
     `encoding='utf-8'`（原本用系統預設編碼，Windows 中文環境是 cp950），

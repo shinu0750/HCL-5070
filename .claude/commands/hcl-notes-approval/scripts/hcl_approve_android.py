@@ -358,6 +358,16 @@ def _tap_text(xml, text, fallback=None, delay=2):
     return False
 
 
+def _find_text_bounds(xml, text):
+    """從 dump XML 找指定 text 節點的 bounds，找不到回傳 None（不 tap）。"""
+    m = re.search(
+        rf'text="{re.escape(text)}"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
+    if not m:
+        return None
+    x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
 def ensure_clean_state():
     """按 Back 2-3 次，確保不在任何開著的信件或子選單內。"""
     for _ in range(3):
@@ -752,16 +762,29 @@ def back_to_unsigned():
     time.sleep(2)
 
 
-def _get_buttons_for(subject, is_notif=False):
-    """根據主旨取按鈕座標（優先用預設值，取不到再動態偵測）。"""
-    form_type = get_form_type(subject)
-    if form_type:
-        preset = FORM_BUTTONS[form_type]
-        return {
-            "leave":   preset["leave"],
-            "approve": None if is_notif else preset["approve"],
-        }
-    return find_nomad_buttons()
+def _get_buttons_for(subject):
+    """
+    取目前畫面的按鈕座標。approve 一律以畫面上是否真的有 text="核准" 節點來判定，
+    不再單靠主旨字串猜測（is_notif）+ FORM_BUTTONS 固定座標假設畫面一定是待核准表單。
+
+    2026-07-06 案例：「黃樹瑆的外出單已核准」通知信，主旨含「外出單」但不含「通知」，
+    舊邏輯誤判成待核准表單、直接套用固定座標 (447,252) 當作核准鈕去點，但那個畫面
+    在同位置實際擺的是「外出單取消通知」按鈕——結果誤觸取消，還真的寄出取消信給 HR。
+    現在改成先讀 UI dump 確認畫面上真的有「核准」文字節點才會回傳 approve 座標，
+    找不到就一律視為只能「離開」（notification / already_approved / 未知按鈕都安全）。
+    """
+    xml = dump_ui()
+    approve = _find_text_bounds(xml, "核准")
+    leave = _find_text_bounds(xml, "離開")
+
+    if leave is None:
+        form_type = get_form_type(subject)
+        leave = FORM_BUTTONS[form_type]["leave"] if form_type else COORD["nomad_leave_fb"]
+
+    if leave is None and approve is None:
+        return find_nomad_buttons()
+
+    return {"leave": leave, "approve": approve}
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -783,8 +806,8 @@ def _screenshot_one_email(cx, cy, subject, count):
 
     screenshots = capture_full_form(count)
 
-    # 離開表單（不核准）
-    buttons = _get_buttons_for(subject, is_notif=True)  # is_notif=True → approve=None
+    # 離開表單（不核准）——Phase 2a 只截圖不核准，do_leave 本身不會用到 approve 座標
+    buttons = _get_buttons_for(subject)
     do_leave(buttons)
 
     return screenshots
@@ -893,13 +916,13 @@ def _approve_one_email(cx, cy, subject):
     開啟表單 → 核准（或對通知信點離開）。
     回傳 status string。
     """
-    is_notif = "通知" in subject
+    is_notif = "通知" in subject  # 只用來決定回傳的狀態文字，不再用來決定按哪個按鈕
     open_nomad_form(cx, cy)
 
-    buttons = _get_buttons_for(subject, is_notif=is_notif)
+    buttons = _get_buttons_for(subject)
     has_approve = buttons.get("approve") is not None
 
-    if is_notif or not has_approve:
+    if not has_approve:
         do_leave(buttons)
         return "notification" if is_notif else "already_approved"
     else:

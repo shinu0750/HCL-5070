@@ -425,7 +425,7 @@ def main():
             print("  找不到 hcl_approve_results.json，無法執行 Phase 3", flush=True)
             return
 
-        with open(approve_path) as f:
+        with open(approve_path, encoding="utf-8") as f:
             data = json.load(f)
 
         DONE_STATUSES = {"approved", "already_approved", "notification", "approved_notification"}
