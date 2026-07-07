@@ -128,6 +128,44 @@ def clear_stale_screenshots():
 # 截圖工具
 # ════════════════════════════════════════════════════════════════════════════════
 
+def _content_hash(path, crop_top=50):
+    """Hash 內容區域（跳過狀態列避免時鐘誤判）。Phase 2a/2b 共用，也用來比對
+    核准前畫面是否跟 Phase 2a 截圖的表單一致（見 _approve_one_email）。"""
+    from PIL import Image
+    import io, hashlib
+    img = Image.open(path)
+    cropped = img.crop((0, crop_top, img.width, img.height))
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG")
+    return hashlib.md5(buf.getvalue()).hexdigest()
+
+
+def _wait_form_loaded(timeout=30):
+    """
+    等待 Nomad 表單內容穩定（連續兩次截圖 hash 相同）並回傳最終 hash。
+    密碼對話框有時在 open_nomad_form 檢查完之後才彈出（session 剛好在此時過期），
+    若不在這個迴圈裡持續偵測，會把對話框畫面當成「已載入」的表單內容
+    （2026-07-02 案例：穆彥池外出單 4 張截圖全部停在 Notes ID Password 畫面）。
+    """
+    load_start = time.time()
+    prev_hash = None
+    while time.time() - load_start < timeout:
+        if handle_notes_password_dialog():
+            load_start = time.time()
+            prev_hash = None
+            continue
+        tmp_path = os.path.join(_TMP, "nomad_load_check.png")
+        screenshot_to_file(tmp_path)
+        current_hash = _content_hash(tmp_path)
+        if current_hash == prev_hash:
+            print(f"    表單已載入（{time.time() - load_start:.1f}s）", flush=True)
+            return current_hash
+        prev_hash = current_hash
+        time.sleep(3)
+    print("    ⚠️ 載入等待逾時，繼續執行", flush=True)
+    return prev_hash
+
+
 def capture_full_form(count):
     """
     截圖 Nomad 表單所有頁面。
@@ -136,40 +174,9 @@ def capture_full_form(count):
     Step 3: 逐頁截圖直到底部（hash 不變 + 多變體手勢確認）
     回傳截圖路徑清單（最多 8 頁）。
     """
-    import hashlib
-    from PIL import Image
-    import io
-
-    def content_hash(path, crop_top=50):
-        """Hash 內容區域（跳過狀態列避免時鐘誤判）。"""
-        img = Image.open(path)
-        cropped = img.crop((0, crop_top, img.width, img.height))
-        buf = io.BytesIO()
-        cropped.save(buf, format="PNG")
-        return hashlib.md5(buf.getvalue()).hexdigest()
-
     # Step 1: 等待載入完成
-    # 密碼對話框有時在 open_nomad_form 檢查完之後才彈出（session 剛好在此時過期），
-    # 若不在這個迴圈裡持續偵測，會把對話框畫面當成「已載入」的表單內容截圖
-    # （2026-07-02 案例：穆彥池外出單 4 張截圖全部停在 Notes ID Password 畫面）。
     print("    等待表單載入...", flush=True)
-    load_start = time.time()
-    prev_load_hash = None
-    while time.time() - load_start < 30:
-        if handle_notes_password_dialog():
-            load_start = time.time()
-            prev_load_hash = None
-            continue
-        tmp_path = os.path.join(_TMP, "nomad_load_check.png")
-        screenshot_to_file(tmp_path)
-        load_hash = content_hash(tmp_path)
-        if load_hash == prev_load_hash:
-            print(f"    表單已載入（{time.time() - load_start:.1f}s）", flush=True)
-            break
-        prev_load_hash = load_hash
-        time.sleep(3)
-    else:
-        print("    ⚠️ 載入等待逾時，繼續執行", flush=True)
+    _wait_form_loaded()
 
     # Step 2: 捲回頂部
     prev_top_hash = None
@@ -178,7 +185,7 @@ def capture_full_form(count):
         time.sleep(0.5)
         _top_check = os.path.join(_TMP, "nomad_top_check.png")
         screenshot_to_file(_top_check)
-        top_hash = content_hash(_top_check)
+        top_hash = _content_hash(_top_check)
         if top_hash == prev_top_hash:
             break
         prev_top_hash = top_hash
@@ -198,7 +205,7 @@ def capture_full_form(count):
     for i in range(8):
         path = os.path.join(_TMP, f"nomad_form_{count}_{chr(ord('a') + i)}.png")
         screenshot_to_file(path)
-        current_hash = content_hash(path)
+        current_hash = _content_hash(path)
 
         if current_hash == prev_hash:
             retried = False
@@ -206,7 +213,7 @@ def capture_full_form(count):
                 adb("shell", "input", "swipe", *swipe_args)
                 time.sleep(1.0)
                 screenshot_to_file(path)
-                retry_hash = content_hash(path)
+                retry_hash = _content_hash(path)
                 if retry_hash != prev_hash:
                     print(f"    [retry] 變體 {v_idx} 成功", flush=True)
                     current_hash = retry_hash
@@ -835,7 +842,7 @@ def phase2a_screenshot_all(subject_filter=None):
     screenshots_path = os.path.join(_TMP, "hcl_screenshots.json")
     existing = {}
     if os.path.exists(screenshots_path) and subject_filter:
-        with open(screenshots_path) as f:
+        with open(screenshots_path, encoding="utf-8") as f:
             for item in json.load(f):
                 existing[item["subject"]] = item
 
@@ -873,7 +880,13 @@ def phase2a_screenshot_all(subject_filter=None):
 
         try:
             screenshots = _screenshot_one_email(cx, cy, subject, count)
-            results_map[subject] = {"subject": subject, "screenshots": screenshots}
+            # page1_hash 供 Phase 2b 核准前比對畫面內容，避免誤核准到別封信殘留的畫面
+            # （2026-07-06 案例：核准動作誤觸到另一封信的畫面，卻因按鈕數量符合驗證
+            # 條件被判定成功，實際上目標表單從未被核准）
+            page1_hash = _content_hash(screenshots[0]) if screenshots else None
+            results_map[subject] = {
+                "subject": subject, "screenshots": screenshots, "page1_hash": page1_hash,
+            }
             print(f"    → {len(screenshots)} 張截圖", flush=True)
         except PasswordError as e:
             print(f"    ✗ 密碼錯誤，停止：{e}", flush=True)
@@ -900,7 +913,7 @@ def phase2a_screenshot_all(subject_filter=None):
 
     results = list(results_map.values())
 
-    with open(screenshots_path, "w") as f:
+    with open(screenshots_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     print(f"\n  Phase 2a 完成：共 {len(results)} 封截圖", flush=True)
@@ -911,13 +924,28 @@ def phase2a_screenshot_all(subject_filter=None):
 # Phase 2b — 核准（讀取 hcl_verified.json）
 # ════════════════════════════════════════════════════════════════════════════════
 
-def _approve_one_email(cx, cy, subject):
+def _approve_one_email(cx, cy, subject, expected_hash=None):
     """
     開啟表單 → 核准（或對通知信點離開）。
+
+    expected_hash：Phase 2a 截圖時存下的該主旨 page1_hash（見 phase2a_screenshot_all）。
+    若有提供，核准前先等畫面穩定並重新比對 hash，不符就代表現在畫面跟 Phase 2a
+    驗證過的表單不是同一封，直接跳過核准（只按離開），避免誤核准/誤按到別封信
+    殘留的畫面（2026-07-06 案例：核准動作誤觸到另一封信的畫面，卻因為按鈕數量
+    符合驗證條件被判定成功，實際上目標表單從未真正被核准）。
+
     回傳 status string。
     """
     is_notif = "通知" in subject  # 只用來決定回傳的狀態文字，不再用來決定按哪個按鈕
     open_nomad_form(cx, cy)
+
+    if expected_hash:
+        current_hash = _wait_form_loaded()
+        if current_hash != expected_hash:
+            print(f"    ⚠️ 畫面內容跟 Phase 2a 截圖不符（可能開錯表單），跳過核准", flush=True)
+            buttons = _get_buttons_for(subject)
+            do_leave(buttons)
+            return "form_mismatch"
 
     buttons = _get_buttons_for(subject)
     has_approve = buttons.get("approve") is not None
@@ -952,6 +980,15 @@ def phase2b_approve_verified():
     approved_subjects = {v["subject"] for v in verified_list if v.get("ok")}
     skipped_subjects  = {v["subject"] for v in verified_list if not v.get("ok")}
 
+    # Phase 2a 存下的每封信 page1_hash，核准前用來確認畫面內容沒開錯（見 _approve_one_email）
+    hash_map = {}
+    screenshots_path = os.path.join(_TMP, "hcl_screenshots.json")
+    if os.path.exists(screenshots_path):
+        with open(screenshots_path, encoding="utf-8") as f:
+            for item in json.load(f):
+                if item.get("page1_hash"):
+                    hash_map[item["subject"]] = item["page1_hash"]
+
     print(f"  已驗證 {len(approved_subjects)} 封，跳過 {len(skipped_subjects)} 封", flush=True)
     if skipped_subjects:
         print("  ⚠️ 以下信件截圖欄位不完整，已跳過（保留在 Unsigned）：", flush=True)
@@ -977,7 +1014,7 @@ def phase2b_approve_verified():
             print(f"\n  {subject[:50]}", flush=True)
 
             try:
-                status = _approve_one_email(cx, cy, subject)
+                status = _approve_one_email(cx, cy, subject, expected_hash=hash_map.get(subject))
             except PasswordError as e:
                 print(f"    ✗ 密碼錯誤，停止：{e}", flush=True)
                 results.append({"subject": subject, "status": "password_error"})

@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.9.0
+version: 2.10.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -100,7 +100,9 @@ python hcl_approve_android.py --screenshot-only
 ```
 
 - 逐封開啟 Unsigned 信件 → 點附件圖示開啟 Nomad → 截圖所有頁面 → 離開（不核准）
-- 輸出：`hcl_screenshots.json`（`[{subject, screenshots: [paths]}]`）
+- 輸出：`hcl_screenshots.json`（`[{subject, screenshots: [paths], page1_hash}]`）
+  `page1_hash` 是第一張截圖（表單頂部，含姓名/工號/狀態）的內容 hash，供 Phase 2b
+  核准前比對畫面是否真的是同一封信（見下方 Phase 2b 的 `form_mismatch`）
 
 **retry 模式**（Claude skill 層寫入 `hcl_retry_subjects.json` 後重跑）：
 - 若 `hcl_retry_subjects.json` 存在，只重截其中指定的主旨
@@ -154,9 +156,18 @@ python hcl_approve_android.py --approve
 ```
 
 - 讀取 `hcl_verified.json`
-- `ok: true` 的信件：開啟 Nomad → 核准（或對通知信點離開）
+- `ok: true` 的信件：開啟 Nomad → 先比對畫面 hash 跟 Phase 2a 的 `page1_hash` 是否一致
+  → 一致才核准（或對通知信點離開），不一致代表開錯表單，跳過核准只按離開
 - `ok: false` 的信件：跳過，status = `screenshot_failed`，保留在 Unsigned
 - 輸出：`hcl_approve_results.json`（`{total, results: [{subject, status}]}`）
+
+> **為什麼要多這層 hash 比對**：舊版核准成功與否只看「按鈕列的按鈕數量有沒有減少」，
+> 不檢查畫面內容是不是真的對到目標信件。2026-07-06 案例：Nomad 沒有正確切換到下一封
+> 信的表單（仍停留在上一封信操作後的殘留畫面），腳本對著錯的畫面點擊，按鈕數量剛好
+> 也符合「核准成功」的判定條件，於是被記錄成 `approved`——但目標表單其實從未被真正
+> 核准，直到隔天人工檢查才發現還是「簽核中」。現在核准前会先等畫面穩定並比對
+> `page1_hash`，不符就直接判定 `form_mismatch`，跳過核准，留在 Unsigned 讓下一輪重試，
+> 不會再產生「日誌說核准成功、實際上什麼都沒發生」的假陽性。
 
 **Phase 2b status 一覽**
 
@@ -167,6 +178,7 @@ python hcl_approve_android.py --approve
 | `notification` | 通知信，點離開 | ✅ |
 | `approve_failed` | 核准驗證失敗 | ❌ 留在 Unsigned |
 | `screenshot_failed` | 截圖欄位不完整，已跳過 | ❌ 留在 Unsigned |
+| `form_mismatch` | 核准前畫面內容跟 Phase 2a 截圖不符（開錯表單），已跳過核准僅按離開 | ❌ 留在 Unsigned |
 | `error` | 處理時發生例外 | ❌ 留在 Unsigned |
 
 ---
@@ -395,6 +407,24 @@ Alert」的訊號，不是欄位真的缺失。
 ---
 
 ## Changelog
+
+- 2.10.0 (2026-07-07): 核准前新增畫面內容 hash 比對，防止假陽性 `approved`
+  - **事故**：2.9.0 修正的是「按錯按鈕」，但同一晚的執行紀錄還發現另一個更隱蔽的
+    問題——穆彥池的外出單核准後隔天複查仍是「簽核中」，日誌卻記錄 `approved`。
+    根因是舊版 `do_approve` 判定成功與否只看「按鈕列的按鈕數量有沒有減少」，完全
+    不檢查當下畫面是不是真的對到目標信件；一旦 Nomad 沒有正確切換到下一封信的
+    表單（例如仍停留在上一封信操作後的殘留畫面），腳本對著錯的畫面按下去，
+    按鈕數量的變化剛好也符合判定條件，於是被誤記成功，但目標表單其實從未被
+    真正核准
+  - **修正**：`phase2a_screenshot_all` 存下每封信第一張截圖的內容 hash
+    （`page1_hash`，寫入 `hcl_screenshots.json`）；`_approve_one_email` 核准前
+    先呼叫新增的 `_wait_form_loaded()` 等畫面穩定，重新比對 hash，不一致就
+    直接判定新狀態 `form_mismatch`（跳過核准、只按離開、留在 Unsigned 供下輪
+    重試），不再核准到錯的畫面卻回報成功。`capture_full_form` 內原本重複定義
+    的 `content_hash`/載入等待邏輯一併抽成共用的 `_content_hash()` /
+    `_wait_form_loaded()`，Phase 2a/2b 共用同一套雜湊邏輯
+  - 順手修正 `hcl_screenshots.json` 讀寫沒有明確指定 `encoding="utf-8"` 的問題
+    （跟 2.8.0 修正 `hcl_retry_subjects.json` 同類）
 
 - 2.9.0 (2026-07-07): 修正誤觸「已核准通知」畫面按鈕、意外取消外出單的嚴重 bug
   - **事故**：`hcl_approve_android.py` 判斷「是否為純通知信」原本用
