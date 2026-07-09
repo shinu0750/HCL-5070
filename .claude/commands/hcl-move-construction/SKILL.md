@@ -4,7 +4,7 @@ description: >
   HCL Verse 入廠施工信件歸檔自動化。當用戶提到入廠施工、施工通知、
   施工信件歸檔、把入廠施工移到 other、整理施工信件時使用此 skill。
   自動掃描收件匣找出所有符合關鍵字的信件（含討論串），逐一移到「other」資料匣。
-version: 1.2.6
+version: 1.3.0
 ---
 
 # HCL Verse 入廠施工信件歸檔
@@ -66,6 +66,38 @@ python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-move-con
 
 若移動 0 封則不需寫入。
 
+## 通知 Google Chat
+
+Hindsight 寫入成功後（移動 > 0 封），透過 n8n webhook 轉發通知到 Google Chat，
+讓使用者不用手動檢查就知道歸檔跑過、跑了什麼。做法沿用 `hcl-notes-approval` 的
+`hcl_write_hindsight.py --notify-only`：
+
+```bash
+python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-notes-approval\scripts\hcl_write_hindsight.py" --notify-only --notify-file <摘要檔案路徑> --space h2YgpyAAAAE
+```
+
+- `<摘要檔案路徑>`：先把摘要文字寫成暫存檔（例如 `%TEMP%\hcl_move_construction_notify.md`），
+  再用 `-f`／`--notify-file` 傳檔案路徑，不要直接傳字串（同全域 CLI 注意事項）。
+  內容範例：
+  ```
+  📁 入廠施工信件歸檔完成（2026-07-09）
+
+  共找到 5 封符合關鍵字的信件，全部成功移動到 other 資料匣，0 封失敗。
+
+  - 張惠鎔 / SCI 安全氣候指標66
+  - M / 溶劑採購通知：液鹼
+  ```
+- `--space h2YgpyAAAAE` 是使用者本人（ShuHsing）的 Google Chat space ID，**必填**——
+  n8n 端沒有隱式 fallback，沒帶會直接在 Google Chat 那步失敗。若未來要幫其他帳號
+  （tzuyu / ycmu）代跑這個歸檔，要換成對方的 space ID（見 `hcl-notes-approval` SKILL.md
+  的「使用者對照表」）。
+- webhook 實際位址是 `http://10.11.1.59:5678/webhook/hcl-approval-notify`（n8n workflow
+  「[HCL] 簽核完成通知 -> Google Chat」），`hcl_write_hindsight.py` 內部已經處理好 POST
+  格式，不需要自己組 payload。
+- 若移動 0 封（沒東西可通知），略過此步驟。
+- 2026-07-09 已實測成功：n8n 回應 `{'message': 'Workflow was started'}`，訊息確實送達
+  使用者本人的 Google Chat。
+
 ## 關鍵技術細節（供除錯參考）
 
 - **移動按鈕 selector**：
@@ -90,6 +122,10 @@ python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-move-con
 
 ## Changelog
 
+- 1.3.0 (2026-07-09): 新增「通知 Google Chat」— Hindsight 寫入成功後，透過
+  `hcl-notes-approval` 的 `hcl_write_hindsight.py --notify-only` 呼叫 n8n webhook
+  轉發摘要到使用者本人的 Google Chat（`--space h2YgpyAAAAE`），不用手動檢查歸檔結果。
+  2026-07-09 實測成功。
 - 1.2.6 (2026-07-05): Hindsight 寫入目標 bank 由 `shuhsing` 改為 `EID`，與其他 HCL skill
   （如 hcl-notes-approval）的 bank 慣例保持一致。
 - 1.2.5 (2026-07-05): 目標資料夾改名 `05Other` → `other`（使用者於 Verse 端重新命名資料夾）。
