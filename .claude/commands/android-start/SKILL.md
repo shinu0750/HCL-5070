@@ -2,9 +2,9 @@
 name: android-start
 description: >-
   啟動 Android 模擬器並左轉螢幕 90°，支援多個帳號測試機（自己/ShuHsing、
-  同事帳號測試/tzuyu，可再擴充）。當用戶說「開啟模擬器」、「啟動 Android」、
-  「開 Android」、「開虛擬機」、「開 tzuyu」、「開同事的模擬器」時使用此 skill。
-version: 4.0.0
+  同事帳號測試/tzuyu、ycmu，可再擴充）。當用戶說「開啟模擬器」、「啟動 Android」、
+  「開 Android」、「開虛擬機」、「開 tzuyu」、「開 ycmu」、「開同事的模擬器」時使用此 skill。
+version: 4.1.0
 ---
 
 # Android 模擬器啟動 + 左轉 90°（參數化，支援多帳號）
@@ -15,6 +15,7 @@ version: 4.0.0
 |------|----------|------|--------|------|
 | 預設（不指名時） | ShuHsing | 5554 | emulator-5554 | 自己的帳號 |
 | tzuyu | tzuyu | 5556 | emulator-5556 | 同事帳號測試（`hcl-notes-approval` 代簽） |
+| ycmu | Ycmu | 5558 | emulator-5558 | 同事帳號測試（`hcl-notes-approval` 代簽） |
 
 **新增第三人時**：在這個表格加一列即可，挑一個沒人用過的偶數 port（例如 5558）。
 不用新增 skill 檔案，也不用改任何程式碼——下面所有步驟都用 `$AVD` / `$PORT` / `$SERIAL`
@@ -23,7 +24,7 @@ version: 4.0.0
 ## 判斷這次要開哪一台
 
 - 用戶沒指名（「開模擬器」「啟動 Android」）→ 用「預設」那一列（ShuHsing / 5554）
-- 用戶提到 tzuyu / 同事帳號 / 對方帳號 → 用 tzuyu 那一列
+- 用戶提到 tzuyu / ycmu / 同事帳號 / 對方帳號 → 查表格對應那一列
 - 用戶提到表格裡沒有的名字 → 先問清楚是要開新的一台（順便問要不要記錄到表格）還是打錯字
 
 決定好後，把下面步驟裡的 `$AVD`、`$PORT`、`$SERIAL` 換成對應值再執行。
@@ -143,6 +144,7 @@ $env:HCL_NOTES_PASSWORD = "..."
 
 ## Changelog
 
+- 4.1.0 (2026-07-09): 新增第三人 ycmu（port 5558），驗證「加表格一列即可」的擴充方式如預期運作
 - 4.0.0 (2026-07-05): 改為參數化，合併 `android-start-tzuyu`
   - 原本一人一個 skill 檔案（`android-start` 只認 ShuHsing、另建 `android-start-tzuyu` 認 tzuyu）
     改成單一 skill + 「已知裝置對照表」，新增第三人只要加表格一列，不用再開新檔案

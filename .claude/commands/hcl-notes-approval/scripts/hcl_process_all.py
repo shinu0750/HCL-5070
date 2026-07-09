@@ -23,13 +23,18 @@ if os.path.exists(_env_path):
                 k, _, v = line.partition('=')
                 os.environ.setdefault(k.strip(), v.strip())
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 PORTAL_URL = os.environ.get("HCL_PORTAL_URL", "https://portal.ecic.com.tw/app/eip.nsf/XPortal.xsp")
 VERSE_URL   = os.environ.get("HCL_VERSE_URL",  "https://mail1.ecic.com.tw/verse")
 USERNAME    = os.environ.get("HCL_USERNAME",    "shuhsing")
 PASSWORD    = os.environ.get("HCL_PASSWORD",    "")
 _TMP        = tempfile.gettempdir()
+
+
+class PortalLoginError(RuntimeError):
+    """HCL Portal/Verse 登入後找不到信件列表時拋出，通常代表密碼錯誤或已到期（每半年更換一次）。"""
+    pass
 
 # 與 hcl_approve_android.py 保持一致
 APPROVAL_KEYWORDS = ["外出單", "加班申請", "未刷卡單", "外出單通知"]
@@ -48,7 +53,16 @@ def _login(page):
     page.wait_for_load_state("networkidle")
     page.goto(VERSE_URL)
     page.wait_for_load_state("networkidle")
-    page.wait_for_selector('[role="treeitem"]', timeout=15000)
+    try:
+        page.wait_for_selector('[role="treeitem"]', timeout=15000)
+    except PlaywrightTimeoutError:
+        # 登入後看不到信件列表，最常見原因是 HCL_PASSWORD 錯誤或已到期
+        # （帳號密碼每半年會強制更換一次）。skill 層看到這個例外時應立即
+        # 通知使用者更新密碼，不要無限重試。
+        raise PortalLoginError(
+            f"登入 HCL Verse 後找不到信件列表（帳號：{USERNAME}）。"
+            "最可能原因是密碼錯誤或已到期（每半年更換一次），請確認並更新 HCL_PASSWORD。"
+        )
     page.wait_for_timeout(2000)
 
 

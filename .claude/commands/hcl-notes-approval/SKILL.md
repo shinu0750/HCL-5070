@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.10.0
+version: 2.12.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -32,6 +32,7 @@ version: 2.10.0
 ~/.hermes/.env           ← 你自己（預設，現有）
 ~/.hermes/.env.tzuyu     ← 同事帳密（HCL_USERNAME / HCL_PASSWORD / HCL_NOTES_PASSWORD 三行即可，
                             HCL_PORTAL_URL / HCL_VERSE_URL 全公司共用，程式碼裡已有預設值，不用重複寫）
+~/.hermes/.env.ycmu      ← 同上
 ```
 
 **使用者對照表**（AVD/Port 定義見 `android-start` skill 的「已知裝置對照表」，這裡列帳密檔案跟 Phase 5 通知目標）：
@@ -40,6 +41,7 @@ version: 2.10.0
 |--------|----------|-----------------|----------------------------------------------|
 | 自己（預設） | `~/.hermes/.env` | `emulator-5554` | `--space h2YgpyAAAAE` |
 | tzuyu（同事測試） | `~/.hermes/.env.tzuyu` | `emulator-5556` | `--space 8DyTYKAAAAE` |
+| ycmu（同事測試） | `~/.hermes/.env.ycmu` | `emulator-5558` | `--space 5tOqwKAAAAE` |
 
 > `--space` 是模組化設計，**每個使用者都要明確帶自己的 space，包括自己**——n8n 端沒有任何
 > 隱式預設值/fallback，沒帶 `--space` 會直接報錯（見下面 Phase 5）。
@@ -57,14 +59,49 @@ python hcl_process_all.py --phase1
 `hcl_process_all.py` / `hcl_approve_android.py` 讀環境變數的路徑都改成
 `os.environ.get("HCL_ENV_FILE", "~/.hermes/.env")`，沒設 `HCL_ENV_FILE` 時行為跟以前一樣。
 
+### 密碼到期偵測與通知（HCL 帳密每半年強制更換一次）
+
+公司 HCL 帳號密碼（`HCL_PASSWORD`，Portal/Verse 登入用）跟 Notes ID 密碼
+（`HCL_NOTES_PASSWORD`，Nomad app 用）都是每半年會被公司系統強制要求更換一次，
+到期後舊密碼會直接失效。這支 skill 執行到一半才發現密碼失效很難跟「單純網路
+不穩」分辨，所以兩支腳本都各自對「密碼失效」定義了明確的例外，**skill 層看到
+下面任一種錯誤時，不要重試或跳過，要立刻通知使用者**：
+
+| 腳本 | 例外/訊號 | 代表意義 |
+|------|-----------|----------|
+| `hcl_process_all.py`（Phase 1/3，Playwright） | `PortalLoginError`：登入後找不到信件列表 | `HCL_PASSWORD` 錯誤或到期 |
+| `hcl_approve_android.py`（Phase 2a/2b，Nomad） | `PasswordError`：log 出現「密碼錯誤，停止」 | `HCL_NOTES_PASSWORD` 錯誤或到期 |
+
+偵測到任一種時，用 `hcl_write_hindsight.py` 的 `--notify-only` 模式（不寫 Hindsight，
+純發送 Google Chat 告警）通知對應帳號本人，`--space` 一樣查上面「使用者對照表」：
+
+```bash
+python -c "
+with open(r'$TEMP/hcl_password_alert.md', 'w', encoding='utf-8') as f:
+    f.write('⚠️ HCL Notes 簽核自動化：偵測到登入/密碼錯誤（帳號：ShuHsing），'
+            '可能是每半年一次的密碼到期，請確認並更新 ~/.hermes/.env 裡的 '
+            'HCL_PASSWORD / HCL_NOTES_PASSWORD。')
+"
+python hcl_write_hindsight.py --notify-only --notify-file "$TEMP/hcl_password_alert.md" --space h2YgpyAAAAE
+```
+
+通知內容務必包含：**哪個帳號**（自己／tzuyu／ycmu）、**哪一組密碼**（Portal 登入用的
+`HCL_PASSWORD` 還是 Nomad 用的 `HCL_NOTES_PASSWORD`）。通知發送後，該帳號本次
+流程視同無法排除的錯誤中止（沿用既有的錯誤處理原則：記錄失敗原因、仍嘗試關閉
+模擬器、不要無限重試），不要因為密碼錯誤卡住而放棄處理另一個帳號。
+
 ## 使用方式
 
 用戶指令範例：
 - `幫我簽核` → 用自己的帳號（`~/.hermes/.env`）執行完整流程
 - `HCL Notes 有沒有待簽核` → 同上
-- `幫我用 tzuyu 的帳號跑簽核` / `幫同事簽核（tzuyu）` → 查上面「使用者對照表」，
-  用對應的 `HCL_ENV_FILE` + `HCL_ADB_SERIAL` 執行完整流程；執行前先確認 tzuyu 模擬器
-  已開機（沒開的話先用 `android-start` skill，跟它說「開 tzuyu」）
+- `幫我用 tzuyu 的帳號跑簽核` / `幫同事簽核（tzuyu）` / `幫 ycmu 簽核` → 查上面
+  「使用者對照表」，用對應的 `HCL_ENV_FILE` + `HCL_ADB_SERIAL` 執行完整流程；執行前
+  先確認該帳號的模擬器已開機（沒開的話先用 `android-start` skill，跟它說「開 tzuyu」
+  或「開 ycmu」）
+- ycmu 是剛準備好的新 AVD，第一次執行 Phase 2a/2b 很可能會遇到「技術注意事項」章節
+  提到的 Execution Security Alert 對話框（每個 agent 簽章只需處理一次），照該章節的
+  步驟放行即可，不是異常
 
 ---
 
@@ -125,8 +162,8 @@ python hcl_approve_android.py --screenshot-only
 
 ### Claude 截圖驗證（skill 層執行）
 
-對每封信件讀取截圖，驗證是否包含以下五個欄位：
-- **姓名**、**類型**（外出申請 / 加班申請 / 未刷卡申請 / 外出單通知）、**日期**、**時間**、**事由**
+對每封信件讀取截圖，驗證是否包含以下六個欄位：
+- **姓名**、**類型**（外出申請 / 加班申請 / 未刷卡申請 / 外出單通知）、**日期**、**時間**、**事由**、**狀態**（畫面上「狀態：」後面的文字，例如「簽核中」「簽核完成」）
 
 | 驗證結果 | 動作 |
 |---------|------|
@@ -136,8 +173,15 @@ python hcl_approve_android.py --screenshot-only
 
 驗證完畢後寫入 `hcl_verified.json`：
 ```json
-[{"subject": "...", "ok": true, "data": {"name": "...", "type": "...", "date": "...", "time": "...", "reason": "..."}}]
+[{"subject": "...", "ok": true, "data": {"name": "...", "type": "...", "date": "...", "time": "...", "reason": "...", "status": "簽核中"}}]
 ```
+
+> ⚠️ **`status` 欄位是 2.10.3 新增的必要欄位，不是可有可無**：Phase 2b 核准前只有
+> 明確看到 `status` 含「簽核中」才會在畫面比對通過後信任固定座標去點核准（見下方
+> Phase 2b 的說明）。**不要用主旨字串猜這封信是不是待簽核**——2026-07-07 tzuyu
+> 帳號的案例：同一份文件已經被別人（帳號一）先核准，tzuyu 收到的副本主旨仍寫
+> 「...，請簽核」（字面上完全沒有「通知」），但畫面其實已經是「狀態：簽核完成」。
+> 只有老老實實讀畫面上的「狀態：」文字才能分辨，主旨會騙人。
 
 > **注意**：`hcl_verified.json` 必須用 Python 寫入確保 UTF-8 編碼：
 > ```python
@@ -408,6 +452,89 @@ Alert」的訊號，不是欄位真的缺失。
 
 ## Changelog
 
+- 2.12.0 (2026-07-09): 新增第三位代簽對象 ycmu
+  - 「使用者對照表」新增 ycmu（帳密檔 `~/.hermes/.env.ycmu`、`HCL_ADB_SERIAL=emulator-5558`、
+    Google Chat space `5tOqwKAAAAE`），對應 `android-start` 已知裝置對照表同步新增的 ycmu 列
+  - ycmu 的 AVD 是新準備的，第一次執行預期會遇到「技術注意事項」提到的 Execution
+    Security Alert（每個 agent 簽章只需處理一次），已在「使用方式」補上提醒
+- 2.11.0 (2026-07-09): 新增密碼到期偵測與 Google Chat 通知
+  - 使用者提醒：公司 HCL 帳密（`HCL_PASSWORD`／`HCL_NOTES_PASSWORD`）每半年強制
+    更換一次，到期時腳本會登入/驗證失敗，過去只會卡住或被歸類成一般錯誤中止，
+    沒有主動通知使用者去更新密碼
+  - `hcl_process_all.py` 新增 `PortalLoginError`：`_login()` 登入後若等不到信件
+    列表（`[role="treeitem"]`），不再讓 Playwright 的 `TimeoutError` 直接往外拋，
+    改成包成訊息明確的 `PortalLoginError`，點名可能是 `HCL_PASSWORD` 錯誤或到期
+  - `hcl_approve_android.py` 既有的 `PasswordError`（`HCL_NOTES_PASSWORD` 錯誤）
+    沿用，不用新增
+  - `hcl_write_hindsight.py` 新增 `--notify-only` 模式：不寫 Hindsight，純發送
+    Google Chat 告警，供密碼錯誤等場景使用（`--date`/`--items-file`/`--content-file`
+    都不需要，只要 `--notify-file` + `--space`）
+  - 新增「密碼到期偵測與通知」章節，說明 skill 層看到 `PortalLoginError` 或
+    `PasswordError` 時要立刻用 `--notify-only` 通知對應帳號本人，並比照既有錯誤
+    處理原則中止該帳號流程（不無限重試、仍嘗試關閉模擬器）
+- 2.10.3 (2026-07-07): 修正 2.10.2 用「主旨不含通知」判斷是否信任固定核准座標的漏洞
+  - **事故**：帳號二 tzuyu 執行時，8 封信裡有一封主旨是「李鎮宇  2026/7/7  的外出單，
+    請簽核」（看起來是待簽核），但畫面實際顯示「狀態：簽核完成」、工具列只有
+    「離開」跟「外出單取消通知」兩顆鈕——因為同一份底層文件已經被帳號一先核准過，
+    tzuyu 收到的只是一份延遲送達的舊提醒信，主旨文字沒跟著更新。2.10.2 的邏輯
+    是「主旨不含『通知』就信任 FORM_BUTTONS 固定核准座標」，這封信的主旨剛好不含
+    「通知」，若不是這次盤點截圖時人工發現，會誤觸到「外出單取消通知」——跟
+    2.9.0 事故一模一樣的失敗模式，只是換一個主旨字串騙過判斷
+  - **修正**：`_approve_one_email` 的固定座標 fallback 改成需要明確的
+    `needs_approval` 參數為 True 才會觸發，這個值來自 Claude 在 skill 層讀
+    Phase 2a 截圖時記錄的 `hcl_verified.json` 的 `data.status` 欄位是否為
+    「簽核中」——不再用任何主旨字串（無論是否含「通知」）做判斷依據。
+    Claude 截圖驗證的必要欄位新增「狀態」（見上面 Phase 2a 之後的驗證段落）
+  - 這起事故在自動化流程內就被攔下（confirmed_pending 只保證畫面身分沒認錯，
+    needs_approval 才保證身分底下真的是待核准表單，兩者都要成立才會動固定
+    座標），沒有造成誤觸；tzuyu 這 8 封信最終全部正確判定為 already_approved/
+    notification，只按離開
+- 2.10.2 (2026-07-07): 修正 `_get_buttons_for` 對 Nomad 表單工具列永遠找不到「核准」的 bug
+  - **事故**：修完 2.10.1 的 form_mismatch 誤判後，Phase 2b 重跑，8 封信改成
+    全部回報 `already_approved`（一樣沒有任何一封真的被核准）
+  - **根因**：HCL Nomad 表單的頂部工具列（離開/核准/駁回）整個由 WebView 畫出來，
+    uiautomator dump 完全看不到裡面任何 text 或 clickable 節點（實測連
+    `find_nomad_buttons()` 這個純靠 bounds、不靠文字的舊版備援機制也一樣抓
+    不到，3 次重試後 fallback 到預設座標）。`_get_buttons_for` 找不到
+    `text="核准"` 就直接判定「這封已經核准過/是通知信」，於是每次都只點
+    離開、從未真正送出核准——這代表 v2.9.0 引入的文字比對安全機制，從當天
+    上線起對這個 WebView 工具列從來沒有真正生效過（只是恰好沒讓人發現，因為
+    也沒誤觸到錯的按鈕）
+  - **修正**：`_approve_one_email` 在「像素比對已確認目前畫面 = Phase 2a 驗證過
+    的『簽核中』畫面」（`confirmed_pending`）且主旨不含「通知」時，改信任
+    `FORM_BUTTONS` 裡該表單類型的固定核准座標，不再要求 uiautomator 一定要
+    抓到「核准」文字節點才敢按。安全性不再依賴 uiautomator 對這個 WebView
+    的（不存在的）accessibility 支援，而是靠 `_images_similar` 的像素比對
+    確認畫面身分——跟 2.9.0 事故那種「單憑主旨字串瞎猜固定座標」不同，這裡
+    是先用截圖內容確認過才信任座標
+  - 沒有 `expected_screenshot`（例如未來拿掉 Phase 2a 直接核准）的呼叫路徑
+    行為不變，仍然保守地只按離開，不會憑空啟用固定核准座標
+- 2.10.1 (2026-07-07): 修正 2.10.0 hash 比對本身導致 100% 誤判 `form_mismatch` 的 bug
+  - **事故**：2.10.0 上線後第一次正式執行（帳號一），Phase 2b 核准 8 封已驗證的
+    表單，結果 8 封全部被判定 `form_mismatch`，一封都沒真的核准成功
+  - **根因（兩層）**：
+    1. `_approve_one_email` 核准前只呼叫 `_wait_form_loaded()` 取得畫面 hash，
+       沒有像 Phase 2a 的 `capture_full_form` 一樣先「捲回頂部」——Nomad 開新
+       表單時會沿用上一封信離開前的捲軸位置，導致比對到的畫面停在「主管核定
+       事項」之類的中段內容，根本不是頂部
+    2. 就算修正捲回頂部，仍然 100% 不符：查證發現 Nomad 的 WebView 每次重新
+       渲染同一份表單，文字反鋸齒的像素都會有 2~4% 的些微差異（同表單、
+       不同時間各開一次），但 `_content_hash` 用精確 MD5 比對零容忍，任何
+       像素差異都判定為「不符」
+  - **修正**：
+    1. 新增共用函式 `_scroll_to_form_top()`（從 `capture_full_form` 抽出），
+       `_approve_one_email` 核准前也呼叫它，確保跟 Phase 2a 截圖比對的是同一個
+       基準點（頂部）
+    2. 新增 `_images_similar()`：改用像素差異百分比而非精確 hash——crop 掉
+       狀態列後，用 `ImageChops.difference` 算差異值 >30 的像素比例，
+       threshold 抓 8%（實測同表單重渲染雜訊約 2~4%，真的開錯畫面/捲軸位置
+       不同時差異可達 15~17%，8% 留有安全邊界）。`_content_hash`
+       （精確 MD5）保留給「同一個 WebView session 內短時間連續截圖是否已經
+       穩定」這種同 session 比對使用，不再用於跨 session/跨時間的內容比對
+    3. `hcl_screenshots.json` 的 `page1_hash` 欄位保留（除錯用），但 Phase 2b
+       比對改讀該筆記錄的 `screenshots[0]`（實際截圖檔路徑）而非 hash 字串
+  - 這次事故本身沒有造成誤核准（`do_leave` 只是跳過核准，未誤觸任何按鈕），
+    純粹是新安全機制過度保守導致當天全部卡住，需要重跑 Phase 2b 才補回
 - 2.10.0 (2026-07-07): 核准前新增畫面內容 hash 比對，防止假陽性 `approved`
   - **事故**：2.9.0 修正的是「按錯按鈕」，但同一晚的執行紀錄還發現另一個更隱蔽的
     問題——穆彥池的外出單核准後隔天複查仍是「簽核中」，日誌卻記錄 `approved`。

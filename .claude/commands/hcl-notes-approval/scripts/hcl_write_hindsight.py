@@ -32,6 +32,9 @@ Windows 端可直接連 http://localhost:8888，無需登入驗證。
    明確帶自己的 space ID，不依賴任何隱式 fallback。代簽別人帳號時記得換成對方的 space
    （見 hcl-notes-approval SKILL.md 的「使用者對照表」）：
    python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify-file summary_table.md --space 8DyTYKAAAAE
+
+3. 純通知（不寫 Hindsight，用於密碼錯誤等告警場景）：
+   python hcl_write_hindsight.py --notify-only --notify-file alert.md --space h2YgpyAAAAE
 """
 
 import argparse
@@ -115,13 +118,33 @@ def retain_async(bank_id, items):
 def main():
     parser = argparse.ArgumentParser(description="寫入 HCL 簽核記錄到 Hindsight")
     parser.add_argument("--bank", default="EID", help="Hindsight bank_id（預設 EID）")
-    parser.add_argument("--date", required=True, help="處理日期，例如 2026-07-03，用來組共用 tag 與 fallback document_id")
+    parser.add_argument("--date", help="處理日期，例如 2026-07-03，用來組共用 tag 與 fallback document_id（--notify-only 時不需要）")
     parser.add_argument("--tag", action="append", default=None, help="共用標籤，可重複指定")
     parser.add_argument("--content-file", help="單筆模式：內容檔案路徑（UTF-8 純文字/Markdown）")
     parser.add_argument("--items-file", help="多筆模式：JSON 陣列檔案路徑，每筆可帶自己的 timestamp")
-    parser.add_argument("--notify-file", help="Hindsight 寫入成功後，把此檔案內容原封不動發送到 Google Chat")
+    parser.add_argument("--notify-file", help="把此檔案內容原封不動發送到 Google Chat（預設須等 Hindsight 寫入成功；配合 --notify-only 可略過 Hindsight 直接發送）")
+    parser.add_argument("--notify-only", action="store_true", help="只發送 Google Chat 通知，不寫入 Hindsight（用於密碼錯誤等告警場景，需搭配 --notify-file + --space）")
     parser.add_argument("--space", help="通知目標的 Google Chat space ID（例如 8DyTYKAAAAE 或 h2YgpyAAAAE）。用 --notify-file 時必填——n8n 端沒有預設值，每個使用者都要明確指定自己的 space")
     args = parser.parse_args()
+
+    if args.notify_only:
+        if not args.notify_file or not args.space:
+            print("  ✗ --notify-only 必須同時指定 --notify-file 與 --space", flush=True)
+            sys.exit(1)
+        with open(args.notify_file, encoding="utf-8") as f:
+            notify_text = f.read()
+        print(f"  通知 Google Chat（webhook: {N8N_NOTIFY_WEBHOOK}，space: {args.space}）...", flush=True)
+        try:
+            notify_result = notify_google_chat(notify_text, space=args.space)
+            print(f"    -> {notify_result}", flush=True)
+        except urllib.error.URLError as e:
+            print(f"  ✗ Google Chat 通知失敗：{e}", flush=True)
+            sys.exit(1)
+        return
+
+    if not args.date:
+        print("  ✗ 必須指定 --date", flush=True)
+        sys.exit(1)
 
     if not args.content_file and not args.items_file:
         print("  ✗ 必須指定 --content-file 或 --items-file 其中之一", flush=True)

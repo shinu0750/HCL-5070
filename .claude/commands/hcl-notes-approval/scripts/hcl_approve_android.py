@@ -129,8 +129,10 @@ def clear_stale_screenshots():
 # ════════════════════════════════════════════════════════════════════════════════
 
 def _content_hash(path, crop_top=50):
-    """Hash 內容區域（跳過狀態列避免時鐘誤判）。Phase 2a/2b 共用，也用來比對
-    核准前畫面是否跟 Phase 2a 截圖的表單一致（見 _approve_one_email）。"""
+    """Hash 內容區域（跳過狀態列避免時鐘誤判）。只適合拿來判斷「同一個 WebView
+    session 內短時間連續兩張截圖是否穩定不變」（見 `_wait_form_loaded`／
+    `capture_full_form` 逐頁截圖），不適合跨 session／跨時間比對同一份內容是否
+    相符──見 `_images_similar` 的說明。"""
     from PIL import Image
     import io, hashlib
     img = Image.open(path)
@@ -138,6 +140,35 @@ def _content_hash(path, crop_top=50):
     buf = io.BytesIO()
     cropped.save(buf, format="PNG")
     return hashlib.md5(buf.getvalue()).hexdigest()
+
+
+def _images_similar(path_a, path_b, crop_top=50, threshold_pct=8.0):
+    """
+    比對兩張截圖是否為「同一份表單內容」，用像素差異百分比而非精確 hash。
+
+    2026-07-07 案例：v2.10.0 原本用 `_content_hash` 的精確 MD5 比對 Phase 2a
+    截圖跟 Phase 2b 核准前的畫面，結果帳號一當天 8 封信全部被判定
+    `form_mismatch`（100% 誤判）。查證發現 Nomad 的 WebView 每次重新開啟表單
+    都會重新渲染文字，即使畫面內容完全相同，文字邊緣的反鋸齒像素也會有些微
+    差異（同一份表單前後兩次渲染，像素差異約 2~4%），但精確 MD5 對這種差異
+    零容忍，導致同一份表單也會被判定「不符」。改用像素差異百分比：
+    同表單重新渲染的雜訊約 2~4%，真的開錯表單／捲軸位置不同時差異可達
+    15%+（實測捲到「主管核定事項」區塊 vs 表單頂部的差異約 17%），
+    threshold 抓 8% 留出安全邊界，同時容忍渲染雜訊、又能抓出真的開錯畫面。
+    """
+    from PIL import Image, ImageChops
+    a = Image.open(path_a).convert("RGB")
+    b = Image.open(path_b).convert("RGB")
+    a = a.crop((0, crop_top, a.width, a.height))
+    b = b.crop((0, crop_top, b.width, b.height))
+    if a.size != b.size:
+        return False
+    diff = ImageChops.difference(a, b).convert("L")
+    hist = diff.histogram()
+    total = a.width * a.height
+    changed = sum(hist[31:])  # 忽略 <=30 的微小色差（反鋸齒雜訊）
+    pct = changed / total * 100
+    return pct < threshold_pct
 
 
 def _wait_form_loaded(timeout=30):
@@ -166,6 +197,33 @@ def _wait_form_loaded(timeout=30):
     return prev_hash
 
 
+def _scroll_to_form_top():
+    """
+    捲回表單頂部（hash 驗證）。回傳頂部畫面的 content hash。
+
+    Nomad 開新表單時不會重設捲動位置，會沿用「上一封信離開前」的捲軸位置
+    （2026-07-07 案例：帳號一 Phase 2b 核准全部 8 封都判定 form_mismatch，
+    查證後發現 `_wait_form_loaded()` 抓到的畫面停在上一封信的「主管核定事項」
+    區塊，根本不是新表單的頂部）。`capture_full_form`（Phase 2a）本來就會在
+    截圖前先捲回頂部，但 `_approve_one_email`（Phase 2b）核准前的 hash 比對
+    只呼叫 `_wait_form_loaded()`、沒有捲回頂部，導致 100% 誤判成「畫面不符」。
+    兩處現在共用這支函式，確保比對的都是同一個基準點（頂部）。
+    """
+    prev_top_hash = None
+    top_hash = None
+    for _ in range(12):
+        adb("shell", "input", "swipe", "1200", "330", "1200", "630", "300")
+        time.sleep(0.5)
+        _top_check = os.path.join(_TMP, "nomad_top_check.png")
+        screenshot_to_file(_top_check)
+        top_hash = _content_hash(_top_check)
+        if top_hash == prev_top_hash:
+            break
+        prev_top_hash = top_hash
+    time.sleep(0.5)
+    return top_hash
+
+
 def capture_full_form(count):
     """
     截圖 Nomad 表單所有頁面。
@@ -179,17 +237,7 @@ def capture_full_form(count):
     _wait_form_loaded()
 
     # Step 2: 捲回頂部
-    prev_top_hash = None
-    for _ in range(12):
-        adb("shell", "input", "swipe", "1200", "330", "1200", "630", "300")
-        time.sleep(0.5)
-        _top_check = os.path.join(_TMP, "nomad_top_check.png")
-        screenshot_to_file(_top_check)
-        top_hash = _content_hash(_top_check)
-        if top_hash == prev_top_hash:
-            break
-        prev_top_hash = top_hash
-    time.sleep(0.5)
+    _scroll_to_form_top()
 
     # Step 3: 逐頁截圖
     SCROLL_VARIANTS = [
@@ -924,31 +972,76 @@ def phase2a_screenshot_all(subject_filter=None):
 # Phase 2b — 核准（讀取 hcl_verified.json）
 # ════════════════════════════════════════════════════════════════════════════════
 
-def _approve_one_email(cx, cy, subject, expected_hash=None):
+def _approve_one_email(cx, cy, subject, expected_screenshot=None, needs_approval=False):
     """
     開啟表單 → 核准（或對通知信點離開）。
 
-    expected_hash：Phase 2a 截圖時存下的該主旨 page1_hash（見 phase2a_screenshot_all）。
-    若有提供，核准前先等畫面穩定並重新比對 hash，不符就代表現在畫面跟 Phase 2a
-    驗證過的表單不是同一封，直接跳過核准（只按離開），避免誤核准/誤按到別封信
-    殘留的畫面（2026-07-06 案例：核准動作誤觸到另一封信的畫面，卻因為按鈕數量
-    符合驗證條件被判定成功，實際上目標表單從未真正被核准）。
+    expected_screenshot：Phase 2a 截圖時存下的該主旨第一張截圖路徑
+    （見 phase2a_screenshot_all 的 screenshots[0]）。若有提供，核准前先等畫面
+    穩定、捲回頂部，再用 `_images_similar` 跟這張截圖比對像素差異比例，
+    差太多就代表現在畫面跟 Phase 2a 驗證過的表單不是同一封，直接跳過核准
+    （只按離開），避免誤核准/誤按到別封信殘留的畫面（2026-07-06 案例：核准
+    動作誤觸到另一封信的畫面，卻因為按鈕數量符合驗證條件被判定成功，實際上
+    目標表單從未真正被核准）。
+
+    注意：一開始這裡用精確 MD5 比對（`_content_hash`），結果 2026-07-07
+    帳號一整批 8 封信 100% 被判定 form_mismatch——查證後發現 WebView 每次
+    重新渲染同一份表單，文字反鋸齒像素都會有些微差異，精確比對零容忍，
+    改用 `_images_similar` 的像素差異百分比才修正（見該函式的說明）。
+
+    needs_approval：Claude 在 skill 層讀 Phase 2a 截圖時，實際看到「狀態：簽核中」
+    才會設 True（見 phase2b_approve_verified 怎麼從 hcl_verified.json 的
+    data.status 算出這個值）。只有這個明確signal為 True，才會在找不到「核准」
+    節點時信任 FORM_BUTTONS 固定座標去點——不能只靠主旨字串猜（見下方說明）。
 
     回傳 status string。
     """
-    is_notif = "通知" in subject  # 只用來決定回傳的狀態文字，不再用來決定按哪個按鈕
+    is_notif = "通知" in subject  # 只用來決定回傳的狀態文字，不影響是否嘗試核准
     open_nomad_form(cx, cy)
 
-    if expected_hash:
-        current_hash = _wait_form_loaded()
-        if current_hash != expected_hash:
+    confirmed_pending = False
+    if expected_screenshot and os.path.exists(expected_screenshot):
+        _wait_form_loaded()
+        # expected_screenshot 是 Phase 2a 捲回頂部後才截的圖，這裡也必須捲回
+        # 頂部再比對，否則會拿「Nomad 沿用上一封信離開時的捲軸位置」的畫面
+        # 去跟頂部畫面比，兩者本來就不會是同一個基準點，永遠比對失敗。
+        _scroll_to_form_top()
+        current_path = os.path.join(_TMP, "nomad_approve_check.png")
+        screenshot_to_file(current_path)
+        if not _images_similar(expected_screenshot, current_path):
             print(f"    ⚠️ 畫面內容跟 Phase 2a 截圖不符（可能開錯表單），跳過核准", flush=True)
             buttons = _get_buttons_for(subject)
             do_leave(buttons)
             return "form_mismatch"
+        confirmed_pending = True
 
     buttons = _get_buttons_for(subject)
     has_approve = buttons.get("approve") is not None
+
+    if not has_approve and confirmed_pending and needs_approval:
+        # 2026-07-07 案例：HCL Nomad 這個表單工具列（離開/核准/駁回）整個是
+        # WebView 畫出來的，uiautomator dump 完全抓不到任何 text/clickable
+        # 節點（`_find_text_bounds`／`find_nomad_buttons` 都拿不到東西），
+        # 導致 `_get_buttons_for` 永遠判定「找不到核准鈕」，把所有待簽核表單
+        # 都誤標成 already_approved，只按離開、從未真正點下核准。
+        #
+        # 一開始這裡只檢查「主旨不含通知」就信任 FORM_BUTTONS 固定座標，結果
+        # 帳號二 tzuyu 當天的案例證明這個假設是錯的：同一份文件已經被帳號一
+        # 核准過，tzuyu 收到的副本主旨仍寫「...，請簽核」（字面上完全不含
+        # 「通知」），但畫面內容其實是「狀態：簽核完成」、工具列只剩「離開」
+        # 跟「外出單取消通知」兩顆鈕——如果照舊用 FORM_BUTTONS 的固定核准座標
+        # 去點，會誤觸到「外出單取消通知」（跟 2.9.0 事故一模一樣的失敗模式，
+        # 只是這次換一個主旨字串騙過了判斷）。
+        #
+        # 修正：改成只信任 `needs_approval`——這個值來自 Claude 在 skill 層
+        # 親眼讀 Phase 2a 截圖裡的「狀態」欄位是不是「簽核中」，不是猜主旨。
+        # 像素比對（confirmed_pending）負責「畫面身分沒認錯」，needs_approval
+        # 負責「這個身分底下真的是待核准表單」，兩個條件都成立才信任固定座標。
+        form_type = get_form_type(subject)
+        fixed = FORM_BUTTONS.get(form_type) if form_type else None
+        if fixed and fixed.get("approve"):
+            buttons = {"leave": buttons.get("leave") or fixed["leave"], "approve": fixed["approve"]}
+            has_approve = True
 
     if not has_approve:
         do_leave(buttons)
@@ -980,14 +1073,23 @@ def phase2b_approve_verified():
     approved_subjects = {v["subject"] for v in verified_list if v.get("ok")}
     skipped_subjects  = {v["subject"] for v in verified_list if not v.get("ok")}
 
-    # Phase 2a 存下的每封信 page1_hash，核准前用來確認畫面內容沒開錯（見 _approve_one_email）
-    hash_map = {}
+    # Claude 在 skill 層讀 Phase 2a 截圖時記錄的「狀態」欄位，只有明確看到
+    # 「簽核中」才算 needs_approval=True（見 _approve_one_email 的說明：不能
+    # 用主旨字串猜，同一份文件被別人先核准過時，主旨仍可能寫「請簽核」但畫面
+    # 其實已經是「簽核完成」）。
+    needs_approval_map = {
+        v["subject"]: "簽核中" in (v.get("data", {}) or {}).get("status", "")
+        for v in verified_list
+    }
+
+    # Phase 2a 存下的每封信第一張截圖路徑，核准前用來確認畫面內容沒開錯（見 _approve_one_email）
+    path_map = {}
     screenshots_path = os.path.join(_TMP, "hcl_screenshots.json")
     if os.path.exists(screenshots_path):
         with open(screenshots_path, encoding="utf-8") as f:
             for item in json.load(f):
-                if item.get("page1_hash"):
-                    hash_map[item["subject"]] = item["page1_hash"]
+                if item.get("screenshots"):
+                    path_map[item["subject"]] = item["screenshots"][0]
 
     print(f"  已驗證 {len(approved_subjects)} 封，跳過 {len(skipped_subjects)} 封", flush=True)
     if skipped_subjects:
@@ -1014,7 +1116,11 @@ def phase2b_approve_verified():
             print(f"\n  {subject[:50]}", flush=True)
 
             try:
-                status = _approve_one_email(cx, cy, subject, expected_hash=hash_map.get(subject))
+                status = _approve_one_email(
+                    cx, cy, subject,
+                    expected_screenshot=path_map.get(subject),
+                    needs_approval=needs_approval_map.get(subject, False),
+                )
             except PasswordError as e:
                 print(f"    ✗ 密碼錯誤，停止：{e}", flush=True)
                 results.append({"subject": subject, "status": "password_error"})
@@ -1044,7 +1150,7 @@ def phase2b_approve_verified():
     for subject in skipped_subjects:
         results.append({"subject": subject, "status": "screenshot_failed"})
 
-    with open(os.path.join(_TMP, "hcl_approve_results.json"), "w") as f:
+    with open(os.path.join(_TMP, "hcl_approve_results.json"), "w", encoding="utf-8") as f:
         json.dump({"total": len(results), "results": results}, f, ensure_ascii=False, indent=2)
 
     print(f"\n  Phase 2b 完成：{len(results)} 封處理完畢", flush=True)
