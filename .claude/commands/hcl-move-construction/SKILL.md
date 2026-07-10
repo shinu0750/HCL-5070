@@ -91,7 +91,7 @@ python "C:\Users\EID\Documents\Claude\ShuHsing\HCL\.claude\commands\hcl-notes-ap
   n8n 端沒有隱式 fallback，沒帶會直接在 Google Chat 那步失敗。若未來要幫其他帳號
   （tzuyu / ycmu）代跑這個歸檔，要換成對方的 space ID（見 `hcl-notes-approval` SKILL.md
   的「使用者對照表」）。
-- webhook 實際位址是 `http://10.11.1.59:5678/webhook/hcl-approval-notify`（n8n workflow
+- webhook 實際位址是 `http://10.11.1.40:5678/webhook/hcl-approval-notify`（n8n workflow
   「[HCL] 簽核完成通知 -> Google Chat」），`hcl_write_hindsight.py` 內部已經處理好 POST
   格式，不需要自己組 payload。
 - 若移動 0 封（沒東西可通知），略過此步驟。

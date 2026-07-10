@@ -49,7 +49,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 HINDSIGHT_BASE = "http://localhost:8888"
-N8N_NOTIFY_WEBHOOK = "http://10.11.1.59:5678/webhook/hcl-approval-notify"
+N8N_NOTIFY_WEBHOOK = "http://10.11.1.40:5678/webhook/hcl-approval-notify"
 
 
 def notify_google_chat(text, space, webhook=N8N_NOTIFY_WEBHOOK):

@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.12.0
+version: 2.13.1
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -350,7 +350,7 @@ python hcl_write_hindsight.py --date 2026-07-03 --items-file items.json --notify
 （workflow id `sP8hjVz2rl5w7IqC`，webhook path `hcl-approval-notify`）：
 
 ```
-POST http://10.11.1.59:5678/webhook/hcl-approval-notify
+POST http://10.11.1.40:5678/webhook/hcl-approval-notify
 Content-Type: application/json
 
 {"text": "<Markdown 表格內容>", "space": "spaces/8DyTYKAAAAE"}
@@ -452,6 +452,31 @@ Alert」的訊號，不是欄位真的缺失。
 
 ## Changelog
 
+- 2.13.1 (2026-07-09): n8n webhook 主機位址變更（10.11.1.59 → 10.11.1.40）
+  - `hcl_write_hindsight.py` 的 `N8N_NOTIFY_WEBHOOK` 常數與本文件的 POST 範例位址同步更新，
+    webhook path（`hcl-approval-notify`）與 payload 格式不變
+- 2.13.0 (2026-07-09): 修正 ycmu 帳號因資料夾雙語命名導致 Unsigned 導航失敗、誤報 0 封的 bug
+  - **事故**：ycmu 首次執行 Phase 2a（`--screenshot-only`），`navigate_to_unsigned()` /
+    `_in_unsigned_list()` 對 Unsigned 資料夾的偵測邏輯用精確字串比對 `'text="Unsigned"' in xml`，
+    但 ycmu 帳號的 Verse 資料夾顯示為雙語名稱「Unsigned-未簽核」（`Sign-完成簽核` 同理），
+    導致 uiautomator dump 裡永遠找不到精確符合 `text="Unsigned"` 的節點——遞迴導航 7 層全部
+    失敗後，腳本沒有拋錯，只是 print 警告後繼續往下跑，最終誤報「Phase 2a 完成：共 0 封截圖」，
+    實際 Unsigned 當時真正有 2 封信（事後用 Playwright 查詢才發現）。跟 2026-07-05 的
+    `hcl_retry_subjects.json` 誤判事故是同一種失敗模式：腳本「跑完沒報錯」不代表真的處理到位，
+    必須另外核對筆數。
+  - **根因**：`_in_unsigned_list()`、`navigate_to_unsigned()` 判斷是否找到 Unsigned 資料夾
+    節點、`_tap_text()` 尋找可點擊節點時，都用 `text="Unsigned"` 這種要求屬性值**完全等於**
+    "Unsigned" 的字串比對，而非前綴/子字串比對。ShuHsing／tzuyu 帳號的資料夾剛好顯示純英文
+    「Unsigned」，所以從未觸發過這個問題；ycmu 是新建帳號，Verse 端顯示雙語資料夾名稱，
+    暴露出這個假設一直是錯的。
+  - **修正**：新增共用函式 `_has_text_prefix(xml, prefix)`（`re.search(rf'text="{prefix}[^"]*"'）`），
+    `_in_unsigned_list()` 與 `navigate_to_unsigned()` 內所有 `'text="Unsigned"' in xml` 判斷式
+    改用這個前綴比對；`_tap_text()` 新增 `prefix=True` 參數，點擊「Unsigned」節點時改用前綴
+    比對取得 bounds 再 tap，兩種命名（純英文 / 雙語）都能正確找到並點擊同一個節點。
+  - 這個 bug 只影響 Android 端（`hcl_approve_android.py`）的資料夾導航；Phase 1/3
+    （`hcl_process_all.py`，Playwright）本來就用 `:has-text()` 做子字串比對，不受影響
+    （ycmu 帳號 Phase 1 當時能正確掃到、移動信件到 Unsigned，只有 Phase 2a 走 Android
+    uiautomator dump 這條路才失敗）。
 - 2.12.0 (2026-07-09): 新增第三位代簽對象 ycmu
   - 「使用者對照表」新增 ycmu（帳密檔 `~/.hermes/.env.ycmu`、`HCL_ADB_SERIAL=emulator-5558`、
     Google Chat space `5tOqwKAAAAE`），對應 `android-start` 已知裝置對照表同步新增的 ycmu 列

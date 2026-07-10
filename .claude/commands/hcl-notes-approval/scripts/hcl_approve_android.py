@@ -388,20 +388,28 @@ def sync_now():
     time.sleep(2)
 
 
+def _has_text_prefix(xml, prefix):
+    """檢查 xml 中是否存在以 prefix 開頭的 text 屬性（前綴比對，相容部分帳號
+    資料夾顯示為雙語名稱的情況，例如 ycmu 帳號的「Unsigned-未簽核」）。"""
+    return re.search(rf'text="{re.escape(prefix)}[^"]*"', xml) is not None
+
+
 def _in_unsigned_list(xml=None):
     """判斷目前是否在 Unsigned 信件列表頁（排除 Folders 列表頁）。"""
     if xml is None:
         xml = dump_ui()
-    return ('text="Unsigned"' in xml
+    return (_has_text_prefix(xml, "Unsigned")
             and 'text="Folders"' not in xml
             and 'text="Subscribe"' not in xml
             and ('id/toolbar' in xml or 'content-desc="More options"' in xml))
 
 
-def _tap_text(xml, text, fallback=None, delay=2):
-    """從 dump XML 找指定 text 節點並 tap 中心點；找不到用 fallback 座標。"""
+def _tap_text(xml, text, fallback=None, delay=2, prefix=False):
+    """從 dump XML 找指定 text 節點並 tap 中心點；找不到用 fallback 座標。
+    prefix=True 時採前綴比對（例如 "Unsigned" 可比對到 "Unsigned-未簽核"）。"""
+    suffix = r'[^"]*' if prefix else ''
     m = re.search(
-        rf'text="{re.escape(text)}"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
+        rf'text="{re.escape(text)}{suffix}"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
     if m:
         cx = (int(m.group(1)) + int(m.group(3))) // 2
         cy = (int(m.group(2)) + int(m.group(4))) // 2
@@ -444,7 +452,7 @@ def navigate_to_unsigned(_depth=0):
         print("  已在 Unsigned 資料夾", flush=True)
         return True
 
-    if 'text="Unsigned"' in xml and 'text="Subscribe"' in xml:
+    if _has_text_prefix(xml, "Unsigned") and 'text="Subscribe"' in xml:
         print("  Unsigned 尚未訂閱，點 Subscribe...", flush=True)
         _tap_text(xml, "Subscribe", delay=10)
         return navigate_to_unsigned(_depth + 1)
@@ -460,17 +468,17 @@ def navigate_to_unsigned(_depth=0):
         return navigate_to_unsigned(_depth + 1)
 
     if 'text="Folders"' in xml:
-        if 'text="Unsigned"' in xml:
+        if _has_text_prefix(xml, "Unsigned"):
             print("  在 Folders 列表，點 Unsigned...", flush=True)
-            _tap_text(xml, "Unsigned", delay=2)
+            _tap_text(xml, "Unsigned", delay=2, prefix=True)
             return navigate_to_unsigned(_depth + 1)
         print("  在 Folders 列表，往下捲找 Unsigned...", flush=True)
         for _ in range(3):
             adb("shell", "input", "swipe", "1200", "800", "1200", "300", "500")
             time.sleep(1)
             xml2 = dump_ui()
-            if 'text="Unsigned"' in xml2:
-                _tap_text(xml2, "Unsigned", delay=2)
+            if _has_text_prefix(xml2, "Unsigned"):
+                _tap_text(xml2, "Unsigned", delay=2, prefix=True)
                 return navigate_to_unsigned(_depth + 1)
         print("  警告：捲完仍找不到 Unsigned，使用固定座標...", flush=True)
         tap(1336, 578, delay=2)
