@@ -4,15 +4,28 @@ description: >
   HCL Verse 信件歸檔 pipeline。當用戶提到歸檔 Verse 信件、處理 04Done 信件、
   把 04Done 的信存成 EML、建立 Verse RAG 索引、整理已完成信件、
   把信移到 domdom、把 Verse 信件上傳到 Gmail 時使用此 skill。從「04Done」資料夾逐封：
-  抓全文+附件 → 拆成訊息級 → 建 RAG 索引(Qdrant) + 存成 EML → 移到「domdom」→ 上傳 Gmail(Notes_Import)。
-version: 3.0.0
+  抓全文+附件 → 拆成訊息級 → 分兩條分支處理（① RAG/Hindsight ② EML/Gmail）→
+  移到「domdom」→ 上傳 Gmail(Notes_Import)。
+version: 3.4.1
 ---
 
 # HCL Verse 信件歸檔 Pipeline
 
-從「**04Done**」資料夾逐封處理已完成的信件。討論串（thread）會拆成**訊息級**處理——
-每則訊息各自用 Domino UNID 當 `document_id`、各自清乾淨引用歷史再存進 RAG/Hindsight，
-避免同一封信被重複歸檔時把舊內容重複灌進去。處理完移到「**domdom**」資料夾。
+從「**04Done**」資料夾逐封處理已完成的信件。討論串（thread）拆成**訊息級**處理，
+每則訊息各自用 Domino UNID 當 `document_id`，然後分成**兩條互相獨立的分支**，
+同一份原始內容各自加工成不同用途、互不干擾：
+
+- **分支 A：RAG + Hindsight** —— body 用清完版（`quote_stripper` 砍掉引用歷史），
+  避免同一封信被重複歸檔、或討論串裡的舊內容透過引用重複灌入。但砍歷史會丟失
+  「這則是回覆哪一則」的前後文關係，所以另外用 `reply_to_unid`（指向被引用那則
+  訊息的 UNID）把這個關係留住——**內容不重複，關係不失聯**。
+- **分支 B：EML + Gmail** —— 每則訊息各自一個 `.eml`（不是一個討論串一個），內文
+  用 `eml_body`（只剝 Verse 自己的 UI chrome 雜訊，**不砍引用歷史**，保留信件原貌），
+  帶標準 `Message-ID`/`In-Reply-To` 信頭（用 UNID/`reply_to_unid` 組），讓 Gmail 匯入
+  後能照標準信頭自動重建討論串關聯。
+
+兩條分支共用同一個 `reply_to_unid` 配對結果，但用途不同：分支 A 拿它當資料庫裡的
+關聯指標，分支 B 拿它組信件標準信頭。處理完移到「**domdom**」資料夾。
 
 > 移出 04Done 本身就是「已處理」游標 —— 不需額外記狀態，下次執行不會重複處理。
 
@@ -24,16 +37,21 @@ version: 3.0.0
 
 ## 執行
 
+> **`python3` vs `python`**：這台機器上 `python3` 是壞掉的 Windows Store 別名
+> （靜默失敗、exit code 49，不會有任何錯誤訊息），實際能用的直譯器是 `python`
+> （`C:\Users\...\Programs\Python\Python312\python.exe`）。下面指令都用 `python`；
+> 如果在真正的 WSL/Linux 環境下執行，`python3` 才是正常對應的指令，屆時可以換回來。
+
 **先用 `--no-move` 試跑**（只處理頂部第一封、不動信箱），確認抓取/索引正常再正式跑：
 
 ```bash
-python3 ~/.claude/skills/hcl-verse-RAG/verse_archive_pipeline.py 5 --no-move
+python ~/.claude/skills/hcl-verse-RAG/verse_archive_pipeline.py 5 --no-move
 ```
 
 正式歸檔（會真的把信移到 domdom）：
 
 ```bash
-python3 ~/.claude/skills/hcl-verse-RAG/verse_archive_pipeline.py [max_results]
+python ~/.claude/skills/hcl-verse-RAG/verse_archive_pipeline.py [max_results]
 ```
 
 - `max_results` 處理上限，預設 50
@@ -47,41 +65,60 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_archive_pipeline.py [max_results]
 **接著自動上傳 Gmail**（正式歸檔後一定要執行，`--no-move` 試跑則略過）：
 
 ```bash
-python3 ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
+python ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
 ```
 
-把 `~/verse-export/` 的 EML 批次 import 到 Gmail 標籤 `Notes_Import`，
-成功後搬到 `~/Documents/eml to gamil/eml_done/`。沿用既有 OAuth 憑證/token
-（`~/Documents/eml to gamil/`），有自己的 log 去重，重跑只補上次失敗的。
+把 `~/verse-export/` 的 EML（每則訊息各自一個檔案）批次 import 到 Gmail 標籤
+`Notes_Import`，成功後搬到 `~/Documents/eml to gamil/eml_done/`。沿用既有 OAuth
+憑證/token（`~/Documents/eml to gamil/`），有自己的 log 去重，重跑只補上次失敗的。
+每則 EML 帶 `Message-ID`/`In-Reply-To`，Gmail 收到後會照標準信頭自動把同一討論串的
+訊息重新串起來，不需要額外處理。
 
 ## 流程（每一列信件）
 
 1. 登入 Verse（`locale="en-US"`）→ `open_folder("04Done")` 進指定資料夾
 2. 取清單**最上面那封**點開，同時攔截每則訊息展開時打出的 `OpenDocument` 網路請求，
    取得每則訊息在 Domino 資料庫裡的真實 **UNID**（`open_row_and_get_block_unids()`）
-3. 抓整串（thread 級）header/raw，供 EML 完整存檔用（不截斷）
+3. 抓整串（thread 級）header/raw——這份只作為資料夾層級摘要跟「一則訊息都抓不到」時的
+   保底 fallback，**不是 EML 的主要來源**（EML 已改成逐則，見步驟 4/6）
 4. **逐則訊息**（`extract_message_block()`，跟 Verse 的 accordion 展開順序一一對應）：
    - 沒有完整表頭的（Verse 自己判定內容已被後面訊息的引用完整涵蓋、只給精簡摘要）→ 跳過
-   - `clean_body()`：剝 UI chrome 雜訊 → `quote_stripper.strip_quoted_history()` 砍掉引用歷史
-     （寄件人:/发件人:/寄件者:/From:+Sent:/-----Original Message-----/-----郵件原件-----/
-     Notes 內嵌 `"名字" ---日期---` 等樣式，抓最早出現的位置砍）
+   - `clean_body_and_identify()`：剝 UI chrome 雜訊 →
+     `quote_stripper.strip_quoted_history_with_identity()` 砍掉引用歷史（寄件人:/发件人:/
+     寄件者:/From:+Sent:/-----Original Message-----/-----郵件原件-----/Notes 內嵌
+     `"名字" ---日期---` 等樣式，抓最早出現的位置砍），**同時回傳被砍掉那段的身份
+     （`quoted_sender`/`quoted_date`）**，供下一步配對 `reply_to_unid` 用 → 產生分支 A 用的
+     `body`（清完版）
+   - `_strip_ui_noise()`（只剝 UI，不砍引用）→ 產生分支 B 用的 `eml_body`（保留完整引用歷史）
    - `resolve_sender()`：用 `email_mapping.py` 查公司通訊錄，把「me」換成目前登入帳號的
      姓名/email（不寫死特定帳號）；查不到的（外部聯絡人/離職同仁）記進未知聯絡人追蹤
+   - to/cc 也分兩份：`resolve_recipients()` 解析成純姓名（分支 A 用，可讀性優先，
+     不需要真的 email）／`substitute_me()` 保留原始 email（`to_raw`/`cc_raw`，分支 B 用，
+     Gmail 匯入需要真實地址）
    - `document_id` = 這則訊息的 Domino UNID（抓不到才退回 `hash(sender|subject|date)` 備援）
-5. 每則訊息各自：
-   - **① RAG**：`text-embedding-3-small` → upsert 到 Qdrant collection `verse_emails`
-     （payload 含 `subject`/`body`/`from_email`/`from_name`/`to`/`cc`/`date`/`sent_date`/
-     `thread_id`/`unid`）
-   - **② Hindsight retain**：`retain` 到 `shuhsing` bank，`document_id`=UNID，
-     `tags=["source:verse"]`（**proj 分類暫緩**，見下方說明），`content` 用姓名不用 email
-6. **③ EML 匯出**：整串完整存檔（不截斷，保留原始信件全貌供人工回溯）→ 下載附件
-   （`verify=False`）→ 打包成 `.eml` 存到 `~/verse-export/`
+5. **`match_reply_to()`**：拿每則訊息的 `quoted_sender`/`quoted_date`，跟同一批訊息的
+   `sender_name`/`sender_email`/`sent_date` 比對，找出「這則回覆的是同一個 thread 裡的
+   哪一則」，寫入 `reply_to_unid`（唯一比對不到就留 `None`，不亂猜）
+6. 每則訊息各自：
+   - **分支 A — ① RAG**：本地 `jina-embed`（llama-cpp-server，OpenAI-compatible API，
+     不需要 OpenAI key）→ upsert 到 Qdrant collection `verse_emails`
+     （payload 含 `subject`/`body`(清完版)/`from_email`/`from_name`/`to`/`cc`(姓名)/
+     `date`/`sent_date`/`thread_id`/`unid`/`reply_to_unid`）
+   - **分支 A — ② Hindsight retain**：`retain` 到 `shuhsing` bank，`document_id`=UNID，
+     `tags=["source:verse"]`（**proj 分類暫緩**，見下方說明），`content`/`metadata.to`/
+     `metadata.cc` 都用姓名不用 email，`metadata.reply_to_unid` 保留前後文關係
+   - **分支 B — ③ EML 匯出**：**每則訊息各自一個 `.eml`**（不是整串一個），內文用
+     `eml_body`（保留完整引用歷史，不截斷）→ 下載該則自己的附件（比對 UNID，
+     `verify=False`）→ `pack_eml()` 帶 `Message-ID`=`make_message_id(unid)`、
+     `In-Reply-To`/`References`=`make_message_id(reply_to_unid)`（有的話）→ 存到
+     `~/verse-export/{主旨}_{序號:02d}_{寄件者}.eml`
 7. **④ 移動**：按「Move to folder」→ 輸入 `domdom` → 該信移出 04Done
 8. 那封消失，回到步驟 2 處理下一封最上面的，直到清空或達上限
 9. 全部歸檔後：
    - 有新的/更新的未知聯絡人 → 產生/合併 `~/verse-export/external_contacts.xlsx`
      → 發 Google Chat 通知（見「未知聯絡人確認機制」章節）
-   - **⑤ 上傳 Gmail**：`verse_upload_gmail.py` 批次 import → 標籤 `Notes_Import` → 搬到 eml_done
+   - **⑤ 上傳 Gmail**：`verse_upload_gmail.py` 批次 import（每則各自一封）→ 標籤
+     `Notes_Import` → 搬到 eml_done
 
 **安全閥**：記已處理列的簽章（`hash(subject|sender|snippet)`）；若最上面那列跟上一輪一樣
 （代表移動失敗它還在頂部），立即停止，避免無限迴圈或重複索引。這個安全閥是「這一列」層級，
@@ -104,6 +141,9 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
 - `email_to_name(email)` / `name_to_email(name)`：雙向查詢
 - 主流程的 `resolve_sender(raw)` 回傳 `(email, name, found_in_directory)` 三元組；
   `substitute_me(raw)` 把 to/cc 字串裡的獨立「me」換成目前帳號的 email
+- `resolve_recipients(raw)`：把 to/cc 字串裡每個 `"Name <email>"` 或純 email 都換成
+  通訊錄查到的姓名，**只給分支 A（RAG/Hindsight）用**——分支 B（EML）要保留原始
+  `to_raw`/`cc_raw`（含真實 email），不能走這個函式，因為 Gmail 匯入需要有效地址
 
 ## 未知聯絡人確認機制
 
@@ -129,11 +169,12 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
 
 ## 結果呈現
 
-讀取兩個結果檔：
-- 歸檔：`/tmp/verse_archive_pipeline_result.json`
+讀取兩個結果檔（路徑都是 `tempfile.gettempdir()` 算出來的，WSL/Linux 下是
+`/tmp/...`，原生 Windows Python 下會是別的路徑如 `%TEMP%\...`，不要寫死 `/tmp`）：
+- 歸檔：`verse_archive_pipeline_result.json`
   `{source, target, no_move, archived_date, sent_date_range, processed, message_total, rag_ok, hindsight_ok, moved, emails[]}`
   （`emails[]` 每筆現在含 `message_count`/`rag_ok`/`hindsight_ok`，因為一列信件可能拆成多則訊息）
-- 上傳：`/tmp/verse_upload_gmail_result.json`
+- 上傳：`verse_upload_gmail_result.json`
   `{total, uploaded, failed, label, done_folder, results[]}`
 
 呈現格式：
@@ -141,32 +182,40 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
 ```
 ✓ 從 04Done 歸檔 N 封（共 M 則訊息）→ domdom
   RAG 索引：M 成功 / Hindsight：M 成功
-  EML：~/verse-export/（含附件，整串完整存檔）
-  Gmail：上傳 N 封到 Notes_Import（搬到 eml_done）
+  EML：~/verse-export/（每則訊息各自一個檔案，含附件，保留完整引用歷史）
+  Gmail：上傳 M 封到 Notes_Import（搬到 eml_done）
   外部聯絡人待確認：X 位（已發 Google Chat 通知 / 略過）
   [1] [5/29] PharmaSuite 專案週報（3 則訊息, RAG 3/3, Hindsight 3/3, 3 附件, moved, gmail ✓）
   [2] ...
 ✗ 失敗：列出 rag/eml/hindsight/move/gmail 任一失敗的信件主旨
 ```
 
-## 寫入 Hindsight
+> 注意：`rec["eml"]` 現在是**每列信件的 `.eml` 路徑清單**（一個討論串可能對應多個檔案），
+> 不再是單一路徑；上傳 Gmail 的封數是 `message_total`（訊息數），不是 `processed`（信件數）。
 
-每則訊息在歸檔時自動 retain（不需手動補寫）。關鍵欄位：
+## 寫入 Hindsight / Qdrant（分支 A）
+
+每則訊息在歸檔時自動 retain + upsert（不需手動補寫）。關鍵欄位：
 
 - `document_id` = 該則訊息的 Domino UNID（idempotent，重跑/重複歸檔同一封不會重複）
 - `timestamp` = `sent_date`（信件真實寄件日，非歸檔日）
-- `content` = 清乾淨且砍過引用歷史的內文，寄件者用姓名（`resolve_sender` 解析），
+- `content` = 清乾淨且砍過引用歷史的內文（`body`），寄件者用姓名（`resolve_sender` 解析），
   不預摘要，讓 Hindsight 自行抽取 facts
 - `tags` = `[source:verse]`（proj 分類暫緩，見上方章節）
-- `metadata` = `{subject, from_email, from_name, to, cc, thread_id, unid, sent_date}`
+- `metadata` = `{subject, from_email, from_name, to, cc, thread_id, unid, reply_to_unid, sent_date}`
+  —— `to`/`cc` 是**姓名**（`resolve_recipients()` 解析），`reply_to_unid` 是這則訊息
+  回覆的上一則的 UNID（`match_reply_to()` 配對），內容雖然砍了引用歷史，但順著這個
+  指標還是能把整串前後文串回去
 
 > `thread_id` 只進 metadata（搜尋折疊用），不扛記憶責任。
+> 分支 B（EML/Gmail）用的是同一批訊息的 `eml_body`/`to_raw`/`cc_raw`，跟這裡的
+> `body`/`to`/`cc` 是分開的兩份資料，互不影響——見上面「流程」章節。
 
 ## 技術細節（除錯參考）
 
 - 信件清單 selector：`.seq-msg-row`（列文字含 `From / Subject / Message abstract`；討論串多一行 `Count\nN`）
-- 閱讀窗格：`.preview-container`；單則訊息容器：`.preview-container [aria-expanded]`
-  （比 `.pim-mailread-container` 精準，後者會把摺疊摘要跟完整訊息都算進去、造成重複計數）
+- 閱讀窗格：`.preview-container`；單則訊息容器：`.preview-container .pim-mailread-container[aria-expanded]`
+  （比單獨用 `.preview-container [aria-expanded]` 精準，避免把摺疊摘要跟完整訊息都算進去、造成重複計數）
 - 資料夾導航：左側 `[role="treeitem"]:has-text("04Done")`；Inbox 才有專屬 class `.inbox`
 - **訊息 UNID**：每則訊息展開時會打
   `https://mail1.ecic.com.tw/mail/{db}.nsf/0/{UNID}/?OpenDocument&...xhr=1` 請求，
@@ -177,22 +226,55 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
 - 引用歷史分隔符（`quote_stripper.py`，拿 04Done 18 個真實討論串驗證過覆蓋率）：
   `寄件人:`/`发件人:`/`寄件者:`（HCL Verse 手機版用字）/`From:`+`Sent:`（外部 Outlook）/
   `-----Original Message-----`/`-----郵件原件-----`/Notes 內嵌 `"名字" ---日期---`
+- **`reply_to_unid` 配對**（`match_reply_to()`）：`strip_quoted_history_with_identity()`
+  在砍掉引用歷史前，先從那段開頭抽出「被引用的是誰、什麼時候」（`quoted_sender`/
+  `quoted_date`），`match_reply_to()` 拿這組身份跟同一批訊息的 `sender_name`/
+  `sender_email`/`sent_date` 比對——名字/email 完全比對到一個就直接用；比對到多個
+  再用日期精確比對；都比不出唯一結果就留 `None`，不亂猜。這是分支 A（body 已砍
+  引用）保留前後文關係的機制，也順便被分支 B 拿去組 EML 的 `In-Reply-To`/`References`
+- **EML 內容來源不是同一份**：分支 A 的 `body`（RAG/Hindsight 用）已經被
+  `strip_quoted_history_with_identity()` 砍過引用歷史；分支 B 的 `eml_body`（EML/Gmail
+  用）只走 `_strip_ui_noise()`，**保留完整引用歷史**，兩者共用同一段抓下來的原始
+  `blk["body"]`，只是後續加工方式不同——改動任一邊時要注意別把這兩條路徑接錯
 - 移動鈕：`button.action.pim-move-to-folder.icon`（取**可見**的那個）。
   注意資料夾檢視的 action-bar 是 `action-bar collapse-stage-0`，**沒有** `action-tray-populated`
   （那是 Inbox 檢視才有）—— 不能用父層 class 比對，要直接鎖定按鈕本身
 - 移動 popup：`div.folder-tray-float.show`，輸入 `input.folder-search-input` 後選
   `[role='treeitem']:visible:has-text('domdom')`（精準比對，避免選錯同名項目）
-- 附件連結：`$File/...?OpenElement`（Domino 標準 URL）；下載需 `verify=False`（公司內部憑證）
-- 附件命名：`a.innerText` 若為空或裸副檔名(pdf/xlsx...)，改從 URL 的 `FileName=` 取真檔名
+- 附件連結：`$File/{UNID}/...?OpenElement`（Domino 標準 URL，網址本身帶該則訊息的
+  UNID）；下載需 `verify=False`（公司內部憑證）。EML 改成逐則後，附件也要照
+  `UNID in href` 比對分給對應那則的 `.eml`，不能整批塞給第一則
+- 附件命名：優先信任 URL 的 `FileName=` 參數（Domino 標準做法，可靠），`a.innerText`
+  只當備援。原本優先信任 `innerText`、只在空字串或裸副檔名時才退回 URL，但 Verse
+  常把 `innerText` 渲染成籠統的操作文字（例如「Download file」），不是空字串也不算
+  短副檔名，舊判斷抓不到這種情況，導致附件檔名整個顯示成「Download file」
 - 日期：`.pim-mailread-sentdate` 底下有 `.pimMailShort`（縮寫）跟 `.pimMailLong`（完整
   時間戳）兩個 span，兩者都在 innerText 裡（不是只有畫面顯示的縮寫），取最長那行即可拿到
   完整時間 → `normalize_sent_date()` 正規化成 ISO；缺年份時推算（月份比今天超前 >7 天 → 去年）。
   避開 `[class*="ate"]`（會混進行事曆 widget 雜訊）
 - Embedding：長討論串可能超過 8192 token 上限 → `get_embedding()` 用 tiktoken 截斷到 8000 token
-- Qdrant：`http://localhost:6333`，collection `verse_emails`，向量 1536 維
+- Qdrant：`http://10.11.1.40:6333`（跑在 Synology NAS 上，**常駐服務**，不是 WSL
+  docker、不需要每次手動啟動），collection `verse_emails`，向量 **2048** 維（實測
+  jina-embeddings-v4 實際輸出 2048 維，不是原本假設的 1024——曾經因為維度不合導致
+  100% upsert 失敗，`.../v1/embeddings` 帶 `dimensions` 參數截斷也不會生效，這個
+  llama-cpp-server 版本不支援 Matryoshka 截斷，四支腳本的 `VECTOR_SIZE` 都要維持 2048）
+- Embedding 伺服器：本地 llama-cpp-server（CPU only，`-ngl 0`，RAM 約 5.9GB），跑在
+  WSL，用 **systemd on-demand socket 架構**管理，四支腳本要接的是
+  `http://localhost:8081/v1`：
+  - `jina-embed.socket`（`ListenStream=0.0.0.0:8081`，`Accept=yes`）：對外的穩定
+    入口，每個新連線交給 `jina-embed@.service`（`proxy-relay.py`）處理
+  - `proxy-relay.py`：收到連線先檢查 backend（127.0.0.1:8090）健不健康，沒在跑就
+    `systemctl start jina-embed.service` 喚醒，等 healthy 後再把連線原封不動轉發過去
+  - `jina-embed.service`：實際跑模型的 llama-server，監聽 **127.0.0.1:8090**——這是
+    背後 backend 專用 port，**不要讓 pipeline 直接接這個**，因為
+    `jina-embed-idle.timer`（`idle-watchdog.sh`）會在閒置 ~10 分鐘後把它關掉省
+    RAM，長時間跑 pipeline 中途接不到會斷線；一定要接 8081 讓 proxy 需要時自動喚醒
+  - 模型：`jina-embed`（實際對應 `jina-embeddings-v4-text-retrieval-Q4_K_M.gguf`）
+  `OPENAI_KEY` 只在傳給 `OpenAI()` client 建構子時當佔位字串用（本地伺服器不驗證），
+  可用 `EMBEDDING_API_BASE`/`EMBEDDING_MODEL` 環境變數覆寫
 - PostgreSQL（`email_mapping` 表 + 之後的 `update_external_contacts.py` 用）：
   host/port/db/user/password 存在 `~/.hermes/.env` 的 `PG_*` 變數
-- 仍想語意搜尋已索引的信：`python3 ~/.claude/skills/hcl-verse-RAG/verse_rag_search.py "查詢" [top_k]`（保留在磁碟）
+- 仍想語意搜尋已索引的信：`python ~/.claude/skills/hcl-verse-RAG/verse_rag_search.py "查詢" [top_k]`（保留在磁碟）
 - Gmail 上傳：`verse_upload_gmail.py [eml_folder] [--label] [--done] [--log]`，
   用 Gmail `messages.import_`(`neverMarkSpam`)。OAuth 憑證/token 在 `~/Documents/eml to gamil/`，
   token 過期會自動 refresh（非互動）；`fix_eml_content` 修補缺/重複的 From 欄位；
@@ -203,9 +285,9 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_upload_gmail.py
 使用 `verse_query.py`（另一支腳本）：
 
 ```bash
-python3 ~/.claude/skills/hcl-verse-RAG/verse_query.py --search "帆宣請款"        # 找信
-python3 ~/.claude/skills/hcl-verse-RAG/verse_query.py --reflect "V3F 最新狀態"   # 問答
-python3 ~/.claude/skills/hcl-verse-RAG/verse_query.py --model "PharmaSuite/MES"  # 進度摘要
+python ~/.claude/skills/hcl-verse-RAG/verse_query.py --search "帆宣請款"        # 找信
+python ~/.claude/skills/hcl-verse-RAG/verse_query.py --reflect "V3F 最新狀態"   # 問答
+python ~/.claude/skills/hcl-verse-RAG/verse_query.py --model "PharmaSuite/MES"  # 進度摘要
 ```
 
 ## Gmail Backfill（一次性）
@@ -213,10 +295,10 @@ python3 ~/.claude/skills/hcl-verse-RAG/verse_query.py --model "PharmaSuite/MES" 
 將整個 Gmail 信箱 backfill 到 Hindsight + Qdrant：
 
 ```bash
-python3 ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py             # 全部
-python3 ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --max 100   # 前 100 封測試
-python3 ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --dry-run   # 只印不寫入
-python3 ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --reset     # 清進度從頭來
+python ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py             # 全部
+python ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --max 100   # 前 100 封測試
+python ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --dry-run   # 只印不寫入
+python ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --reset     # 清進度從頭來
 ```
 
 - `document_id` = `hash(from|subject|date)`，idempotent，可重跑/斷點續跑
@@ -230,12 +312,117 @@ python3 ~/.claude/skills/hcl-verse-RAG/gmail_backfill.py --reset     # 清進度
 
 - `update_external_contacts.py`（讀回 Excel、upsert `email_mapping`、回填 Qdrant/Hindsight）
   還沒寫，「未知聯絡人確認機制」目前只做到通知，讀回還是手動
-- `~/.hermes/.env` 還沒有真的 `OPENAI_API_KEY`，導致整支 pipeline 從未真正跑過完整的
-  活體端對端驗證（含真的呼叫 embedding API）——目前只驗證到各模組的單元測試層級
 - proj 分類 backfill 腳本還沒寫（暫緩中，等實際批次 review 時再做）
+- Embedding server（`jina-embed.socket`，port 8081）背後的 backend 閒置 ~10 分鐘會被
+  `jina-embed-idle.timer` 自動關掉省 RAM——正常情況下接 8081 會自動喚醒，但喚醒
+  過程（`systemctl start` + 等 healthy）大約要幾秒到十幾秒，長討論串批次歸檔的
+  第一個 embedding 請求可能會等比較久，屬於預期行為不是 bug
 
 ## Changelog
 
+- 3.4.2 (2026-07-11): 修正 Qdrant 實際位置 —— 跑在 10.11.1.40，不是 WSL localhost
+  - 四支腳本（`verse_archive_pipeline.py`/`verse_rag_search.py`/`verse_query.py`/
+    `gmail_backfill.py`）的 `QDRANT_URL` 預設值從 `http://localhost:6333` 改成
+    `http://10.11.1.40:6333`；環境目前沒有設定 `QDRANT_URL` 環境變數覆寫，照舊預設值
+    跑 RAG 那步會連錯地方
+  - 原因：先前文件誤記成「跑在 WSL docker 容器」，之後排除 Qdrant 相關問題要往
+    10.11.1.40 這台 Synology NAS 查，不是本機 WSL
+  - port 沿用 Qdrant 預設 6333，未變
+  - 補充確認：NAS 上是**常駐服務**，不像舊文件講的 WSL docker 容器那樣可能因
+    重開機/WSL 重啟變成 Exited、需要手動 `docker start`——已知缺口章節原本那條
+    「重開機可能要手動啟動」的提醒一併移除
+- 3.4.1 (2026-07-11): 執行指令 `python3` → `python`
+  - 這台機器的 `python3` 是壞掉的 Windows Store 別名（靜默失敗，exit code 49，
+    沒有任何錯誤輸出），實測必須用 `python` 才能正常執行。「執行」章節所有指令
+    範例（`verse_archive_pipeline.py`/`verse_upload_gmail.py`/`verse_rag_search.py`/
+    `verse_query.py`/`gmail_backfill.py`，共 11 處）都改成 `python`，並加註在真正
+    WSL/Linux 環境下 `python3` 才是正常對應指令，屆時可換回來
+- 3.4.0 (2026-07-11): 修正 embedding port 誤判、`verse_rag_search.py` 的 API 相容性、
+  4 支腳本的結果檔路徑/編碼
+  - **Embedding server port 修正 8090 → 8081**：3.3.0 誤以為 8090（llama-server
+    backend 直接監聽的 port）就是正確答案，但這個 port 背後有
+    `jina-embed-idle.timer` 閒置 ~10 分鐘會自動關掉省 RAM——長時間跑 pipeline
+    中途接不到會斷線。查了 WSL 上的 systemd 設定才發現真正的穩定入口是
+    **8081**（`jina-embed.socket`，on-demand activation）：沒人用時 backend 是關的，
+    一有連線 `proxy-relay.py` 會自動 `systemctl start jina-embed.service` 喚醒、
+    等 healthy 再轉發，用完閒置一段時間又會被關掉——這才是設計上該接的埠。
+    四支腳本的 `EMBEDDING_API_BASE` 預設值都改成 8081
+  - **`verse_rag_search.py` 修正 `qdrant.search()` → `qdrant.query_points()`**：目前
+    安裝的 qdrant-client 版本已經移除 `.search()`（`AttributeError`）。順便修正
+    結果欄位對應——原本讀的是 `payload.get("from")`/`payload.get("snippet")`，
+    但實際 payload 存的 key 是 `from_name`/`from_email`/`body`，就算 API 呼叫修好了
+    結果也會全部是空字串，一併改成讀正確的 key（加上 `sent_date`/`unid`/
+    `reply_to_unid`）
+  - **`OUTPUT_FILE` 路徑改用 `tempfile.gettempdir()`**：`verse_rag_search.py`/
+    `verse_query.py`/`verse_upload_gmail.py` 原本寫死 `/tmp/...`，在非 WSL 的原生
+    Windows Python 下該路徑不存在，會直接 `FileNotFoundError`；改成
+    `os.path.join(tempfile.gettempdir(), ...)`，跟 `verse_archive_pipeline.py`
+    原本的寫法一致
+  - **`OUTPUT_FILE` 寫入補上 `encoding="utf-8"`**：4 支腳本（含
+    `verse_archive_pipeline.py`）寫結果 JSON 時都沒指定編碼，Windows 預設
+    codepage（如 cp950）遇到 Notes 信件常見的不換行空白等字元會直接
+    `UnicodeEncodeError`——代表正式歸檔全部跑完（Verse 爬取 + Qdrant/Hindsight
+    寫入）後，可能在最後寫摘要這一步才崩潰。全部補上 `encoding="utf-8"`
+  - 這幾個修正都用實際指令驗證過（`query_points()` 呼叫成功、暫存路徑+UTF-8
+    寫入獨立測試通過），只有最後一次語意搜尋因為 embedding server 剛好被
+    idle-watchdog 關掉、重啟後才用 8081 重新測過一次確認成功
+- 3.3.0 (2026-07-11): 分支 A 首次活體端對端驗證，修正兩個擋住 100% 寫入的 bug
+  - **Qdrant 向量維度修正 1024 → 2048**：實測發現本地 jina-embeddings-v4 server 實際
+    回傳 2048 維，不是先前假設的 1024，導致 collection 建立時維度不合、upsert 100%
+    失敗（查證時 collection 是空的，`points_count: 0`，代表這個 bug 從 3.1.0 改用本地
+    embedding 後就沒讓任何一筆資料寫進去過）。已重建 `verse_emails` collection 為
+    2048 維，`verse_archive_pipeline.py`/`gmail_backfill.py` 的 `VECTOR_SIZE` 同步更新；
+    API 的 `dimensions` 參數在這個 llama-cpp-server 版本不會生效（不支援 Matryoshka
+    截斷），所以是用完整 2048 維，不是截斷
+  - **Embedding server port**：一開始誤判成 8090（llama-server backend 本身監聽的
+    port），後來發現正確答案是 **8081**（見 3.4.0 修正）
+  - **Hindsight 拒絕 `reply_to_unid: null`**：討論串裡最原始那則訊息（沒有回覆對象）
+    的 `reply_to_unid` 是 `None`，直接傳給 Hindsight metadata 會被 pydantic validation
+    擋下來（`Input should be a valid string`）。修正成 `reply_to_unid` 為空值時整個
+    省略這個 metadata key，不傳 null；同時修正 `retain()` 呼叫端只看有沒有拋出
+    Python exception就當作成功的問題——現在會額外檢查回應內容裡有沒有
+    `validation error` 字樣，避免把實際被拒絕的寫入誤判成功
+  - **端對端驗證**：拿 04Done 真實討論串「MES與Intouch連線問題」（3 則訊息）修正後
+    重跑，Qdrant 3/3、Hindsight 3/3 全部成功。驗證了兩種讀取效果：Qdrant 語意搜尋
+    正確依相關度排出三則訊息；Hindsight `reflect` 能正確整合三則訊息（body 已各自
+    砍過引用歷史）綜合回答根本原因/短期方案/長期方案，寄件者用姓名不用 email，
+    `reply_to_unid` 在 raw memory 的 metadata 裡正確可見
+  - 順帶發現但**尚未修正**：`verse_rag_search.py` 用的 `qdrant.search()` 在目前安裝的
+    qdrant-client 版本已被移除（應改用 `query_points()`），見「已知缺口」章節
+- 3.2.0 (2026-07-11): 定案「兩分支」設計——RAG/Hindsight 用清完版，EML/Gmail 用完整版
+  - **分支拆開**：同一則訊息的原始內容明確拆成兩份加工結果，各走各的用途，不再共用：
+    - 分支 A（RAG/Hindsight）：`body`（`clean_body_and_identify()`，砍引用歷史）、
+      `to`/`cc`（`resolve_recipients()`，解析成姓名，不含 email）
+    - 分支 B（EML/Gmail）：`eml_body`（`_strip_ui_noise()`，只剝 UI 雜訊，**保留**引用
+      歷史）、`to_raw`/`cc_raw`（`substitute_me()`，保留真實 email，Gmail 匯入需要）
+  - **`reply_to_unid` 前後文機制**：`quote_stripper.strip_quoted_history_with_identity()`
+    砍引用歷史前先抽出「被引用的是誰、什麼時候」，`match_reply_to()` 拿去跟同批訊息比對，
+    寫入 `reply_to_unid`——分支 A 的 body 雖然砍了引用，但靠這個指標保留討論串前後文
+    關係；同一組配對結果也給分支 B 拿去組 EML 的 `Message-ID`/`In-Reply-To`/`References`
+  - **EML 改成逐則**：從「一個討論串一個 EML（整串塞在一起）」改成「**每則訊息各自
+    一個 `.eml`**」，帶標準 `Message-ID`（UNID）/`In-Reply-To`（`reply_to_unid`），
+    Gmail 匯入後靠標準信頭自動重建討論串，不用自己另外處理；附件也改成照 UNID 分給
+    對應那則
+  - **原因**：分支 A 需要去重（避免討論串裡的舊內容透過引用重複灌爆 Hindsight），但
+    去重會丟失「這則回覆哪一則」的關係；分支 B 需要保留信件原貌供人工回溯、且要能被
+    Gmail 正確匯入。兩邊需求互斥（一個要砍、一個不能砍），所以拆成兩條獨立分支，只
+    共用同一組 `reply_to_unid` 配對結果銜接兩邊
+  - 詳細設計討論見對話記錄；已用 04Done 真實討論串「MES與Intouch連線問題」（3 則訊息）
+    端對端驗證 `reply_to_unid` 配對正確、EML 內容完整保留引用歷史、Message-ID/
+    In-Reply-To 正確串接（測試腳本另存，未寫入正式 Qdrant/Hindsight、未搬移信件）
+- 3.1.0 (2026-07-11): RAG embedding 改用本地模型，不再需要 OpenAI API key
+  - `verse_archive_pipeline.py` / `verse_rag_search.py` / `verse_query.py` / `gmail_backfill.py`
+    的 `text-embedding-3-small`（OpenAI 雲端）全部改成本地 llama-cpp-server 跑的
+    `jina-embed`（`jina-embeddings-v4-text-retrieval-Q4_K_M.gguf`），`OpenAI()` client
+    只是借用 SDK 打 OpenAI-compatible API，`base_url` 指到 `http://localhost:8082/v1`，
+    `api_key` 只當佔位字串（本地伺服器不驗證）
+  - 向量維度 1536 → 1024（jina-embeddings-v4），四支腳本的 `VECTOR_SIZE` 與 Qdrant
+    collection `verse_emails` 需同步；新增 `EMBEDDING_API_BASE`/`EMBEDDING_MODEL`
+    環境變數可覆寫
+  - 原因：pipeline 一直卡在要求使用者提供 OpenAI key，但公司內部已有本地 embedding
+    server 可用，改用它就完全不需要外部 API key
+  - 過程中發現 Qdrant（跑在 WSL docker 容器 `qdrant`）目前是 Exited 狀態，需要先啟動
+    才能真的寫入——這是下一個要排除的障礙，跟本次改動無關
 - 3.0.0 (2026-07-10): 訊息級拆分 + 引用截斷 + 身份解析 + 未知聯絡人確認機制
   - **Locale bug 修復**：`browser.new_context()` 加 `locale="en-US"`，避免 Verse 跟著
     系統語系顯示中文介面、對不上寫死的英文 selector（曾造成整支 pipeline 完全抓不到任何

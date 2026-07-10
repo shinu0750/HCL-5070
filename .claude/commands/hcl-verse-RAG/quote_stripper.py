@@ -21,7 +21,8 @@ QUOTE_BOUNDARY_PATTERNS = [
     re.compile(r'From:\s*\S.*?\n\s*Sent:', re.DOTALL),
     re.compile(r'-{3,}\s*Original Message\s*-{3,}', re.IGNORECASE),
     re.compile(r'-{3,}\s*[邮郵]件原件\s*-{3,}'),
-    re.compile(r'"[^"\n]{1,30}"\s*---\d{4}/\d{2}/\d{2}'),  # Notes: "名字" ---2026/07/08...---
+    re.compile(r'"?[^"\n]{1,30}?"?\s*---\s*\d{4}[/年]\d{1,2}[/月]\d{1,2}[^\n-]{0,25}---'),
+    # Notes 內嵌：「"名字" ---2026/07/08...---」或「名字---2026/07/08...---」（引號可有可無）
 ]
 
 
@@ -41,6 +42,60 @@ def strip_quoted_history(text):
     if idx is None:
         return text.strip()
     return text[:idx].rstrip()
+
+
+# ── 被引用者身份抽取：砍之前先看被砍掉那段開頭是誰、什麼時候 ────────────────
+# Notes 內嵌引用：「"名字" ---日期---」或「名字---日期---」（引號可有可無）
+_IDENTITY_INLINE = re.compile(
+    r'"?([^"\n]{1,30}?)"?\s*---\s*(\d{4}[/年]\d{1,2}[/月]\d{1,2}[^\n-]{0,25})---'
+)
+# 中文表頭區塊：寄件人:/寄件者:/发件人: 後面（同一行）接姓名或 email
+_IDENTITY_HEADER_SENDER = re.compile(r'(?:寄件人|寄件者|发件人)[:：]\s*"?([^"<\[\n]{1,50}?)(?:\s*[\[<"]|\s*$|\n)')
+_IDENTITY_HEADER_DATE = re.compile(r'(?:日期|發送時間|发送时间)[:：]\s*([^\n]{1,40})')
+# 英文 Outlook 表頭區塊：From:/Sent:
+_IDENTITY_FROM = re.compile(r'From:\s*([^\n<]{1,60})')
+_IDENTITY_SENT = re.compile(r'Sent:\s*([^\n]{1,60})')
+
+
+def extract_quoted_identity(text, boundary_idx, window=300):
+    """從引用分隔符開始往後一小段文字，抽取「被引用的是誰、什麼時候」。
+    回傳 (sender, date_str)，抽不到的欄位回傳 None。"""
+    if boundary_idx is None:
+        return None, None
+    snippet = text[boundary_idx:boundary_idx + window]
+
+    m = _IDENTITY_INLINE.match(snippet)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+
+    sender = date_str = None
+    m = _IDENTITY_HEADER_SENDER.search(snippet)
+    if m:
+        sender = m.group(1).strip().rstrip('"')
+    m = _IDENTITY_HEADER_DATE.search(snippet)
+    if m:
+        date_str = m.group(1).strip()
+
+    if sender is None:
+        m = _IDENTITY_FROM.search(snippet)
+        if m:
+            sender = m.group(1).strip()
+        m = _IDENTITY_SENT.search(snippet)
+        if m:
+            date_str = m.group(1).strip()
+
+    return sender, date_str
+
+
+def strip_quoted_history_with_identity(text):
+    """砍掉引用歷史，同時回傳被砍掉那段的身份資訊，方便之後拿去跟同一個討論串裡
+    其他訊息比對，建立「這則是回覆哪一則」的關聯（reply_to）。
+    回傳 (cleaned_text, quoted_sender, quoted_date)。"""
+    idx = find_quote_boundary(text)
+    if idx is None:
+        return text.strip(), None, None
+    sender, date_str = extract_quoted_identity(text, idx)
+    return text[:idx].rstrip(), sender, date_str
 
 
 # ── 自我測試：拿之前手動確認過的兩個真實訊息當基準 ──────────────────────────
@@ -98,16 +153,45 @@ Hi 子瑜,可以先幫我試試看這樣夠不夠嗎?
 """
 
 
+_SAMPLE_HUNG = """回覆: 巡視各棟內外陰井、雨水溝結果
+各位主管好:
+
+A棟與外勞宿舍陰井皆已修復完成，
+
+外勞宿舍陰井主因是垃圾太多堵塞，目前工程有清理泵堵塞陰井恢復正常，
+
+請後續外勞宿舍與餐廳陰井相關單位協調定期處理，謝謝
+
+洪建旭---2026/07/09 上午 10:46:11---各位主管好： 巡視各棟內外陰井、雨水溝結果如下：
+
+各位主管好：
+巡視各棟內外陰井、雨水溝結果如下：
+"""
+
+
 def _run_self_test():
     print("=== self-test: kane (BF41) ===")
-    out = strip_quoted_history(_SAMPLE_KANE)
+    out, sender, date = strip_quoted_history_with_identity(_SAMPLE_KANE)
     print(out)
-    print(f"--- 原長 {len(_SAMPLE_KANE)} -> 清完 {len(out)} ---\n")
+    print(f"--- 原長 {len(_SAMPLE_KANE)} -> 清完 {len(out)}，被引用者=({sender!r}, {date!r}) ---\n")
+    assert sender == "ycmu@ecic.com.tw", sender
+    assert date == "2026年7月7日 19:10", date
 
     print("=== self-test: 劉子瑜 (MES abort) ===")
-    out = strip_quoted_history(_SAMPLE_TZUYU)
+    out, sender, date = strip_quoted_history_with_identity(_SAMPLE_TZUYU)
     print(out)
-    print(f"--- 原長 {len(_SAMPLE_TZUYU)} -> 清完 {len(out)} ---\n")
+    print(f"--- 原長 {len(_SAMPLE_TZUYU)} -> 清完 {len(out)}，被引用者=({sender!r}, {date!r}) ---\n")
+    assert sender == "Candy Chao", sender
+    assert date == "2026/07/08 下午 03:17:19", date
+
+    print("=== self-test: 蔡道明回覆洪建旭 (巡視各棟內外陰井，無引號版本) ===")
+    out, sender, date = strip_quoted_history_with_identity(_SAMPLE_HUNG)
+    print(out)
+    print(f"--- 原長 {len(_SAMPLE_HUNG)} -> 清完 {len(out)}，被引用者=({sender!r}, {date!r}) ---\n")
+    assert sender == "洪建旭", sender
+    assert date == "2026/07/09 上午 10:46:11", date
+
+    print("全部自我測試通過 ✓")
 
 
 if __name__ == "__main__":

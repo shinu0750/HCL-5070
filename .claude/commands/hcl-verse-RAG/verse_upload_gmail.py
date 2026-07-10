@@ -14,7 +14,7 @@ Verse EML → Gmail 上傳（參數化版，供 hcl-verse-RAG pipeline 串接）
     --done     = ~/Documents/eml to gamil/eml_done
     憑證/token = ~/Documents/eml to gamil/{credentials,token}.json
 """
-import os, sys, base64, time, json, shutil, re, argparse
+import os, sys, base64, time, json, shutil, re, argparse, tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -29,7 +29,7 @@ GMAIL_DIR        = "/Users/shuhsing/Documents/eml to gamil"
 CREDENTIALS_FILE = os.path.join(GMAIL_DIR, "credentials.json")
 TOKEN_FILE       = os.path.join(GMAIL_DIR, "token.json")
 SCOPES           = ['https://www.googleapis.com/auth/gmail.modify']
-OUTPUT_FILE      = "/tmp/verse_upload_gmail_result.json"
+OUTPUT_FILE      = os.path.join(tempfile.gettempdir(), "verse_upload_gmail_result.json")
 BATCH_SIZE       = 50
 DELAY_SECONDS    = 1
 
@@ -139,7 +139,7 @@ def main():
     if not eml_dir.exists():
         print(f"❌ 找不到資料夾：{args.eml_folder}")
         json.dump({"error": "eml_folder_not_found", "eml_folder": str(eml_dir)},
-                  open(OUTPUT_FILE, "w"), ensure_ascii=False)
+                  open(OUTPUT_FILE, "w", encoding="utf-8"), ensure_ascii=False)
         sys.exit(1)
 
     all_eml = sorted(f for f in eml_dir.rglob("*") if f.suffix.lower().strip() == '.eml')
@@ -150,7 +150,7 @@ def main():
         print("🎉 沒有待上傳的 EML")
         json.dump({"total": len(all_eml), "uploaded": 0, "failed": 0,
                    "label": args.label, "done_folder": args.done, "results": []},
-                  open(OUTPUT_FILE, "w"), ensure_ascii=False, indent=2)
+                  open(OUTPUT_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         return
 
     creds = authenticate()
@@ -186,7 +186,7 @@ def main():
 
     summary = {"total": len(all_eml), "uploaded": success, "failed": fail,
                "label": args.label, "done_folder": str(done_path), "results": results}
-    json.dump(summary, open(OUTPUT_FILE, "w"), ensure_ascii=False, indent=2)
+    json.dump(summary, open(OUTPUT_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     print(f"\n✓ 上傳完成：成功 {success}、失敗 {fail} → 標籤「{args.label}」，已搬到 {done_path}")
     print(f"  結果已寫入 {OUTPUT_FILE}")
 

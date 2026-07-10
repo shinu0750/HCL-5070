@@ -5,10 +5,13 @@ HCL Verse 歸檔 pipeline
 從「04Done」資料夾逐封處理：抓全文+附件 → 建 RAG 索引(Qdrant) + 存成 .eml
 → 處理完移到「domdom」資料夾（移出來源 = 天然去重游標）。
 
-討論串（thread）拆成「訊息級」處理：每則訊息各自用 Domino UNID 當
-document_id（不是 hash 畫面文字），RAG/Hindsight 各自獨立一筆；
-每則訊息的引用歷史（quote-in-body）會被截斷，避免重複內容灌爆 Hindsight。
-EML 匯出仍是整串完整存檔（不截斷），供人工回溯查閱原始信件。
+兩種用途、兩份不同粒度的資料，互不影響：
+- RAG(Qdrant)/Hindsight：討論串（thread）拆成「訊息級」處理，每則訊息各自用 Domino
+  UNID 當 document_id（不是 hash 畫面文字），各自獨立一筆；每則的引用歷史
+  （quote-in-body）會被截斷，避免重複內容灌爆 Hindsight；同時比對被砍掉的引用身份
+  資訊，配對出 reply_to_unid 存進 payload/metadata，記錄訊息間的回覆關聯
+- EML：整封信/整串完整存檔（不截斷、不砍引用），保留信件原貌，供人工回溯查閱、
+  上傳 Gmail 用
 
 用法：
     python3 verse_archive_pipeline.py [max_results] [--no-move] [--headful]
@@ -41,7 +44,7 @@ from openai import OpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.expanduser("~/Claude/HCL"))
-from quote_stripper import strip_quoted_history
+from quote_stripper import strip_quoted_history, strip_quoted_history_with_identity
 from email_mapping import email_to_name, resolve_me
 from external_contacts_tracker import (
     load_state as load_contacts_state,
@@ -83,13 +86,21 @@ PORTAL_URL    = os.environ.get("HCL_PORTAL_URL", "https://portal.ecic.com.tw/app
 VERSE_URL     = os.environ.get("HCL_VERSE_URL",  "https://mail1.ecic.com.tw/verse")
 USERNAME      = os.environ.get("HCL_USERNAME",    "shuhsing")
 PASSWORD      = os.environ.get("HCL_PASSWORD",    "")
-QDRANT_URL    = os.environ.get("QDRANT_URL",      "http://localhost:6333")
+QDRANT_URL    = os.environ.get("QDRANT_URL",      "http://10.11.1.40:6333")
 OPENAI_KEY    = os.environ.get("OPENAI_API_KEY",  "")
+# 本地 llama-cpp-server 跑 jina-embeddings-v4（CPU），OpenAI-compatible API，不需要真的 OpenAI key
+# 8081 是 systemd on-demand socket（jina-embed.socket），沒人用時自動關掉背後的
+# llama-server 省 RAM，一有請求會自動喚醒——不要接 8090，那是背後 backend 本身的
+# port，閒置 ~10 分鐘會被 idle-watchdog 關掉，長時間跑 pipeline 中途會斷線
+EMBEDDING_API_BASE = os.environ.get("EMBEDDING_API_BASE", "http://localhost:8081/v1")
+EMBEDDING_MODEL    = os.environ.get("EMBEDDING_MODEL",    "jina-embed")
 
 SOURCE_FOLDER = "04Done"
 TARGET_FOLDER = "domdom"
 COLLECTION    = "verse_emails"
-VECTOR_SIZE   = 1536
+# 實測發現 jina-embeddings-v4 實際回傳 2048 維（不是原本假設的 1024），
+# Qdrant collection 已重建成 2048 維，這裡要同步，否則 upsert 100% 失敗
+VECTOR_SIZE   = 2048
 OUTPUT_FILE   = os.path.join(tempfile.gettempdir(), "verse_archive_pipeline_result.json")
 
 MY_EMAIL, MY_NAME = resolve_me(USERNAME)  # 目前登入帳號 -> (email, 姓名)，取代寫死 shuhsing
@@ -118,7 +129,7 @@ NOTIFY_SCRIPT = os.path.join(
     _PROJECT_ROOT, ".claude", "commands", "hcl-notes-approval", "scripts", "hcl_write_hindsight.py")
 
 qdrant        = QdrantClient(url=QDRANT_URL)
-openai_client = OpenAI(api_key=OPENAI_KEY)
+openai_client = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
 
 
 # ── Qdrant / embedding / id ────────────────────────────────────────────────
@@ -171,7 +182,7 @@ def get_embedding(text):
             text = _ENC.decode(toks[:EMBED_TOKEN_LIMIT])
     elif len(text) > EMBED_TOKEN_LIMIT * 2:
         text = text[:EMBED_TOKEN_LIMIT * 2]
-    res = openai_client.embeddings.create(model="text-embedding-3-small", input=text)
+    res = openai_client.embeddings.create(model=EMBEDDING_MODEL, input=text)
     return res.data[0].embedding
 
 
@@ -201,6 +212,29 @@ def substitute_me(raw):
     if not raw:
         return raw
     return re.sub(r'(?<![\w@.])me(?![\w@.])', MY_EMAIL or 'me', raw)
+
+
+def resolve_recipients(raw):
+    """把 to/cc 字串裡每個 'Name <email>' 或純 email 都換成通訊錄查到的姓名，
+    只給 RAG/Hindsight 用（可讀性優先，不需要真的 email）。EML 那邊要保留原始
+    收件人資訊（含 email），不要走這個函式——兩種輸出用途不同，見 pipeline 文件說明。"""
+    if not raw:
+        return raw
+    names = []
+    for part in (p.strip() for p in raw.split(',')):
+        if not part:
+            continue
+        m = re.match(r'^"?([^"<>]*)"?\s*<([^<>]+)>$', part)
+        if m:
+            display, addr = m.group(1).strip(), m.group(2).strip()
+            name = email_to_name(addr)
+            names.append(name if name != addr else (display or addr))
+        elif '@' in part:
+            name = email_to_name(part)
+            names.append(name if name != part else part)
+        else:
+            names.append(part)  # 已經是純姓名（Notes 內部位址常見），原樣保留
+    return "、".join(names)
 
 
 # ── 日期正規化 ───────────────────────────────────────────────────────────────
@@ -378,8 +412,9 @@ def is_date_line(s):
     return any(p.match(s) for p in _DATE_PATS)
 
 
-def clean_body(raw, subject):
-    """先剝 UI chrome 雜訊，再砍掉引用歷史（quote_stripper）。"""
+def _strip_ui_noise(raw, subject):
+    """剝掉 UI chrome 雜訊（Toggle/Reply/日期行/收件人行等），回傳乾淨的原始信件文字
+    （還沒砍引用歷史）。"""
     lines = raw.split("\n")
     cleaned, found = [], False
     for line in lines:
@@ -396,8 +431,19 @@ def clean_body(raw, subject):
             if re.match(r'^.{1,40}\s+to\s+(me|you)\b', s):
                 continue
             cleaned.append(line)
-    body = "\n".join(cleaned).strip()
-    return strip_quoted_history(body)
+    return "\n".join(cleaned).strip()
+
+
+def clean_body(raw, subject):
+    """先剝 UI chrome 雜訊，再砍掉引用歷史（quote_stripper）。"""
+    return strip_quoted_history(_strip_ui_noise(raw, subject))
+
+
+def clean_body_and_identify(raw, subject):
+    """跟 clean_body() 一樣，但額外回傳被砍掉那段引用歷史的身份資訊
+    (quoted_sender, quoted_date)，給之後配對 reply_to_unid 用。
+    回傳 (body_clean, quoted_sender, quoted_date)。"""
+    return strip_quoted_history_with_identity(_strip_ui_noise(raw, subject))
 
 
 def parse_msg_row(item):
@@ -493,7 +539,7 @@ UNID_RE = re.compile(r'/0/([0-9A-Fa-f]{32})/\?OpenDocument')
 def open_row_and_get_block_unids(page, row_locator):
     """
     點開一列信件，同時攔截每則訊息展開時打出的 OpenDocument 請求，
-    取得跟 `.preview-container [aria-expanded]` DOM 順序一一對應的 UNID 陣列。
+    取得跟 `.preview-container .pim-mailread-container[aria-expanded]` DOM 順序一一對應的 UNID 陣列。
     UNID 是 Domino 文件本身的 id，不受帳號/資料夾/畫面顯示格式影響，
     比 hash(寄件人|主旨|日期) 可靠（跨帳號、跨資料夾重複開同一封都會拿到同一個值）。
     """
@@ -510,13 +556,13 @@ def open_row_and_get_block_unids(page, row_locator):
         page.wait_for_timeout(2000)
 
         n = page.evaluate(
-            "() => document.querySelectorAll('.preview-container [aria-expanded]').length"
+            "() => document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]').length"
         )
         block_unid = [None] * n
 
         # 一進來就展開的那則（通常是最新一則），它的 OpenDocument 請求在 click() 時就打了
         states = page.evaluate(
-            "() => [...document.querySelectorAll('.preview-container [aria-expanded]')]"
+            "() => [...document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]')]"
             ".map(el => el.getAttribute('aria-expanded'))"
         )
         pointer = 0
@@ -531,7 +577,7 @@ def open_row_and_get_block_unids(page, row_locator):
                 continue
             before = len(captured)
             page.evaluate("""(i) => {
-                const els = [...document.querySelectorAll('.preview-container [aria-expanded]')];
+                const els = [...document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]')];
                 const el = els[i];
                 if (el && el.getAttribute('aria-expanded') === 'false') el.click();
             }""", idx)
@@ -545,10 +591,10 @@ def open_row_and_get_block_unids(page, row_locator):
 
 
 def extract_message_block(page, idx):
-    """抓第 idx 則訊息（`.preview-container [aria-expanded]` 的第 idx 個元素）自己的
-    sender/date/to/cc/bcc/body，跟其他訊息的內容互不干擾。"""
+    """抓第 idx 則訊息（`.preview-container .pim-mailread-container[aria-expanded]` 的第 idx
+    個元素）自己的 sender/date/to/cc/bcc/body，跟其他訊息的內容互不干擾。"""
     return page.evaluate(r"""(i) => {
-        const blocks = [...document.querySelectorAll('.preview-container [aria-expanded]')];
+        const blocks = [...document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]')];
         const b = blocks[i];
         if (!b) return null;
         const dateEl = b.querySelector('.pim-mailread-sentdate');
@@ -592,6 +638,42 @@ def extract_message_block(page, idx):
     }""", idx)
 
 
+# ── 建立訊息間的回覆關聯（reply_to_unid）──────────────────────────────────────
+def match_reply_to(messages):
+    """幫每則訊息找出它引用/回覆的是同一個 thread 裡的哪一則，寫進 reply_to_unid。
+    依據是 clean_body_and_identify() 抓到的「被引用者姓名/日期」，跟同一批訊息的
+    sender_name/sender_email/sent_date 比對。找不到或無法唯一判斷就留 None，不亂猜。
+    """
+    for m in messages:
+        quoted_sender = m.pop("_quoted_sender", None)
+        quoted_date = m.pop("_quoted_date", None)
+        m["reply_to_unid"] = None
+        if not quoted_sender:
+            continue
+
+        qs = quoted_sender.strip()
+        candidates = []
+        for other in messages:
+            if other is m:
+                continue
+            name = (other.get("sender_name") or "").strip()
+            email = (other.get("sender_email") or "").strip()
+            if not name and not email:
+                continue
+            if qs == name or (email and qs.lower() == email.lower()) or \
+               (name and (qs in name or name in qs)):
+                candidates.append(other)
+
+        if len(candidates) == 1:
+            m["reply_to_unid"] = candidates[0]["unid"]
+        elif len(candidates) > 1 and quoted_date:
+            quoted_norm = normalize_sent_date(quoted_date)
+            exact = [c for c in candidates if quoted_norm and c.get("sent_date") == quoted_norm]
+            if len(exact) == 1:
+                m["reply_to_unid"] = exact[0]["unid"]
+    return messages
+
+
 # ── 附件下載 / EML 打包（沿用 export 邏輯，整串完整存檔，不截斷）────────────────
 def get_attachment_links(page):
     return page.evaluate("""() => {
@@ -609,14 +691,18 @@ def download_attachments(links, cookies):
         if att['href'] in seen:
             continue
         seen.add(att['href'])
-        nm = (att['name'] or '').strip()
-        # nm 為空、或只是裸副檔名（pdf/xlsx/docx...）時，改從 URL 的 FileName= 取真檔名
-        if not nm or re.fullmatch(r'[A-Za-z0-9]{2,5}', nm):
-            try:
-                nm = urllib.parse.unquote(att['href'].split('FileName=')[1].split('&')[0])
-            except Exception:
-                pass
-        name = urllib.parse.unquote(nm) or "attachment"
+        # 優先從 URL 的 FileName= 取真檔名——比 a.innerText 可靠。Verse 常把 innerText
+        # 渲染成籠統的操作文字（例如 "Download file"），不是真檔名，且不限於空字串或
+        # 裸副檔名這兩種好偵測的形式，乾脆固定信任 URL，innerText 只當備援。
+        name = None
+        try:
+            name = urllib.parse.unquote(att['href'].split('FileName=')[1].split('&')[0])
+        except Exception:
+            pass
+        if not name:
+            nm = (att['name'] or '').strip()
+            name = urllib.parse.unquote(nm) if nm else None
+        name = name or "attachment"
         resp = session.get(att['href'], verify=False)
         if resp.status_code == 200:
             attachments.append((name, resp.content))
@@ -635,7 +721,13 @@ def _sent_date_to_rfc2822(sent_date):
         return ''
 
 
-def pack_eml(meta, body, attachments):
+def make_message_id(unid):
+    """用 UNID 組出 RFC 5322 的 Message-ID，讓 mail client（含 Gmail）能靠標準信頭
+    自動重建討論串關聯，不用自己另外做 UI 呈現。"""
+    return f"<{unid}@verse.ecic.com.tw>"
+
+
+def pack_eml(meta, body, attachments, unid=None, reply_to_unid=None):
     msg = EmailMessage(policy=email.policy.SMTP)
     msg['From']     = meta.get('from') or meta.get('sender', '')
     msg['To']       = meta.get('to') or USERNAME
@@ -644,6 +736,12 @@ def pack_eml(meta, body, attachments):
     msg['Subject']  = meta['subject']
     msg['Date']     = _sent_date_to_rfc2822(meta.get('sent_date', '')) or meta.get('date', '')
     msg['X-Source'] = 'HCL Verse / 04Done'
+    if unid:
+        msg['Message-ID'] = make_message_id(unid)
+    if reply_to_unid:
+        parent_id = make_message_id(reply_to_unid)
+        msg['In-Reply-To'] = parent_id
+        msg['References'] = parent_id
     msg.set_content(body)
     for name, data in attachments:
         msg.add_attachment(data, maintype='application', subtype='octet-stream', filename=name)
@@ -834,7 +932,8 @@ def main():
                         # Verse 自己判定這則已被後面訊息的引用完整涵蓋，只給精簡摘要
                         # （沒有完整表頭可抓）——不用重複處理
                         continue
-                    body_clean = clean_body(blk["body"], meta["subject"])
+                    body_clean, quoted_sender, quoted_date = clean_body_and_identify(
+                        blk["body"], meta["subject"])
                     if len(body_clean) < 3:
                         continue
                     sender_email, sender_name, sender_found = resolve_sender(blk.get("from"))
@@ -848,12 +947,23 @@ def main():
                         "unid": unid,
                         "sender_email": sender_email,
                         "sender_name": sender_name,
-                        "to": substitute_me(blk.get("to", "")),
-                        "cc": substitute_me(blk.get("cc", "")),
+                        # RAG/Hindsight 只需要可讀的姓名，不需要 email——EML 那邊另外用
+                        # thread_header/thread_raw 的原始值（含 email、不砍引用），兩邊互不影響
+                        "to": resolve_recipients(substitute_me(blk.get("to", ""))),
+                        "cc": resolve_recipients(substitute_me(blk.get("cc", ""))),
+                        "to_raw": substitute_me(blk.get("to", "")),  # 給 EML 用，保留 email
+                        "cc_raw": substitute_me(blk.get("cc", "")),
                         "date": blk.get("date", ""),
                         "sent_date": normalize_sent_date(blk.get("date", "")),
                         "body": body_clean,
+                        # 給 EML 用：只剝 Verse 自己的 UI chrome，不砍引用歷史（引用是原始信件
+                        # 內容的一部分，EML 要保留信件原貌，不能動）
+                        "eml_body": _strip_ui_noise(blk["body"], meta["subject"]),
+                        "_quoted_sender": quoted_sender,
+                        "_quoted_date": quoted_date,
                     })
+
+                match_reply_to(messages)  # 幫每則訊息配對它回覆的是同一 thread 裡的哪一則
 
                 if not messages:
                     # 保底：一則都沒抓到就退回整串當一則處理，避免整封信被跳過
@@ -861,11 +971,15 @@ def main():
                         "unid": make_id(meta["subject"], thread_sender_email, thread_date_str),
                         "sender_email": thread_sender_email,
                         "sender_name": thread_sender_name,
-                        "to": thread_header.get("to", ""),
-                        "cc": thread_header.get("cc", ""),
+                        "to": resolve_recipients(thread_header.get("to", "")),
+                        "cc": resolve_recipients(thread_header.get("cc", "")),
+                        "to_raw": thread_header.get("to", ""),
+                        "cc_raw": thread_header.get("cc", ""),
                         "date": thread_date_str,
                         "sent_date": thread_sent_date,
                         "body": clean_body(thread_raw, meta["subject"]),
+                        "eml_body": _strip_ui_noise(thread_raw, meta["subject"]),
+                        "reply_to_unid": None,
                     }]
 
                 rec = {"subject": meta["subject"], "from": thread_sender_name,
@@ -887,6 +1001,7 @@ def main():
                                 "to": m["to"], "cc": m["cc"],
                                 "date": m["date"], "sent_date": m["sent_date"],
                                 "thread_id": thread_id, "unid": m["unid"],
+                                "reply_to_unid": m.get("reply_to_unid"),
                             })])
                         rag_ok += 1
                     except Exception as e:
@@ -894,7 +1009,21 @@ def main():
 
                     try:
                         tags = ["source:verse"]  # proj tag 先不分類，事後用同一個 document_id 補上（覆蓋 tags）
-                        hindsight.retain(
+                        metadata = {
+                            "subject":    meta["subject"],
+                            "from_email": m["sender_email"],
+                            "from_name":  m["sender_name"],
+                            "to":         m["to"],
+                            "cc":         m["cc"],
+                            "thread_id":  thread_id,
+                            "unid":       m["unid"],
+                            "sent_date":  m["sent_date"],
+                        }
+                        # Hindsight schema 要求 metadata 值是字串——reply_to_unid 是 None
+                        # （原始信，沒有回覆對象）時整個省略這個 key，傳 null 會被 validation 擋下來
+                        if m.get("reply_to_unid"):
+                            metadata["reply_to_unid"] = m["reply_to_unid"]
+                        result = hindsight.retain(
                             content=(
                                 f"主旨：{meta['subject']}\n"
                                 f"寄件者：{m['sender_name']}"
@@ -904,42 +1033,48 @@ def main():
                             document_id=m["unid"],
                             timestamp=m["sent_date"],
                             tags=tags,
-                            metadata={
-                                "subject":    meta["subject"],
-                                "from_email": m["sender_email"],
-                                "from_name":  m["sender_name"],
-                                "to":         m["to"],
-                                "cc":         m["cc"],
-                                "thread_id":  thread_id,
-                                "unid":       m["unid"],
-                                "sent_date":  m["sent_date"],
-                            },
+                            metadata=metadata,
                             context=f"HCL Verse 信件：主旨「{meta['subject']}」，寄件者 {m['sender_name']}",
                         )
-                        hindsight_ok += 1
+                        result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
+                        if "validation error" in result_text.lower():
+                            print(f"  ✗ Hindsight 被拒絕（{m['sender_name']}）：{result_text[:200]}")
+                        else:
+                            hindsight_ok += 1
                     except Exception as e:
                         print(f"  ✗ Hindsight 失敗（{m['sender_name']}）：{e}")
 
                 rec["rag_ok"] = rag_ok
                 rec["hindsight_ok"] = hindsight_ok
 
-                # ② EML 匯出（整串完整存檔，不截斷，供人工回溯查閱）
+                # ② EML 匯出：每則訊息各自一個 .eml（跟 RAG/Hindsight 那份訊息級+去重的
+                # 資料是分開的兩種用途）。內文只剝 Verse 的 UI chrome，不砍引用歷史——
+                # 引用是原始信件內容的一部分，EML 要保留信件原貌讓人回溯查閱、上傳 Gmail。
+                # 帶 Message-ID/In-Reply-To（用 unid/reply_to_unid 組），Gmail 收到後會照
+                # 這些標準信頭自動重建討論串關聯。
                 try:
-                    att_links   = get_attachment_links(page)
-                    cookies     = {c['name']: c['value'] for c in page.context.cookies()}
-                    attachments = download_attachments(att_links, cookies)
-                    eml_meta = {
-                        "from": thread_sender_email or thread_sender_name,
-                        "to": thread_header.get("to", ""), "cc": thread_header.get("cc", ""),
-                        "subject": meta["subject"], "date": thread_date_str,
-                        "sent_date": thread_sent_date,
-                    }
-                    eml_bytes = pack_eml(eml_meta, thread_raw, attachments)
-                    eml_path  = os.path.join(OUTPUT_DIR, f"{safe_filename(meta['subject'])}.eml")
-                    with open(eml_path, 'wb') as f:
-                        f.write(eml_bytes)
-                    rec["eml"] = eml_path
-                    rec["attachments"] = [a[0] for a in attachments]
+                    att_links = get_attachment_links(page)
+                    cookies   = {c['name']: c['value'] for c in page.context.cookies()}
+                    eml_paths, all_attachment_names = [], []
+                    for i, m in enumerate(messages):
+                        own_links = [a for a in att_links if m["unid"] and m["unid"] in a['href']]
+                        attachments = download_attachments(own_links, cookies) if own_links else []
+                        eml_meta = {
+                            "from": m["sender_email"] or m["sender_name"],
+                            "to": m.get("to_raw", m["to"]), "cc": m.get("cc_raw", m["cc"]),
+                            "subject": meta["subject"], "date": m["date"],
+                            "sent_date": m["sent_date"],
+                        }
+                        eml_bytes = pack_eml(eml_meta, m["eml_body"], attachments,
+                                             unid=m["unid"], reply_to_unid=m.get("reply_to_unid"))
+                        fname = f"{safe_filename(meta['subject'])}_{i:02d}_{safe_filename(m['sender_name'])}.eml"
+                        eml_path = os.path.join(OUTPUT_DIR, fname)
+                        with open(eml_path, 'wb') as f:
+                            f.write(eml_bytes)
+                        eml_paths.append(eml_path)
+                        all_attachment_names.extend(a[0] for a in attachments)
+                    rec["eml"] = eml_paths
+                    rec["attachments"] = all_attachment_names
                 except Exception as e:
                     rec["eml"] = f"fail: {e}"
                     print(f"  ✗ EML 失敗：{e}")
@@ -990,7 +1125,7 @@ def main():
         "rag_ok": rag_ok_total, "hindsight_ok": hindsight_ok_total, "moved": moved,
         "emails": results,
     }
-    with open(OUTPUT_FILE, "w") as f:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     print(f"\n✓ 完成：處理 {len(results)} 封（共 {message_total} 則訊息），"
           f"RAG {rag_ok_total}/{message_total} / Hindsight {hindsight_ok_total}/{message_total} 成功，"

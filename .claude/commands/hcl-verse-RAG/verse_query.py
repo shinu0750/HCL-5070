@@ -15,7 +15,7 @@ HCL Verse 查詢腳本
   python3 verse_query.py --search "8D 報告" --top 5
   python3 verse_query.py --reflect "V3F 洩漏事件後來怎樣了"
 """
-import os, sys, json, argparse, requests
+import os, sys, json, argparse, requests, tempfile
 from pathlib import Path
 
 _env = os.path.expanduser("~/.hermes/.env")
@@ -35,10 +35,12 @@ sys.path.insert(0, os.path.expanduser("~/Claude/HCL"))
 from project_keywords import PROJECT_KEYWORDS, match_projects
 
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://localhost:8888/mcp/")
-QDRANT_URL    = os.environ.get("QDRANT_URL",    "http://localhost:6333")
+QDRANT_URL    = os.environ.get("QDRANT_URL",    "http://10.11.1.40:6333")
 OPENAI_KEY    = os.environ.get("OPENAI_API_KEY", "")
+EMBEDDING_API_BASE = os.environ.get("EMBEDDING_API_BASE", "http://localhost:8081/v1")
+EMBEDDING_MODEL    = os.environ.get("EMBEDDING_MODEL",    "jina-embed")
 COLLECTION    = "verse_emails"
-OUTPUT_FILE   = "/tmp/verse_query_result.json"
+OUTPUT_FILE   = os.path.join(tempfile.gettempdir(), "verse_query_result.json")
 
 # 專案名稱 → mental model id 的查表（啟動時從 Hindsight 抓）
 _model_map: dict[str, str] = {}
@@ -137,13 +139,13 @@ def do_model(hindsight: HindsightClient, query: str) -> dict:
 def do_search(query: str, top_k: int = 5) -> dict:
     print(f"[search] {query} (top {top_k})")
     qdrant = QdrantClient(url=QDRANT_URL)
-    cli    = OpenAI(api_key=OPENAI_KEY)
+    cli    = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
 
     existing = {c.name for c in qdrant.get_collections().collections}
     if COLLECTION not in existing:
         return {"mode": "search", "query": query, "error": f"Collection '{COLLECTION}' 不存在"}
 
-    emb = cli.embeddings.create(model="text-embedding-3-small", input=query).data[0].embedding
+    emb = cli.embeddings.create(model=EMBEDDING_MODEL, input=query).data[0].embedding
     hits = qdrant.query_points(collection_name=COLLECTION, query=emb,
                                limit=top_k, with_payload=True).points
 
@@ -208,7 +210,7 @@ def main():
         sys.exit(0)
 
     output = {"results": results}
-    with open(OUTPUT_FILE, "w") as f:
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     # 印出給 Claude 讀

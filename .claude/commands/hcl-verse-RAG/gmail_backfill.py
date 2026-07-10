@@ -43,10 +43,12 @@ CREDENTIALS_FILE = os.path.join(GMAIL_DIR, "credentials.json")
 TOKEN_FILE       = os.path.join(GMAIL_DIR, "token.json")
 SCOPES           = ["https://www.googleapis.com/auth/gmail.modify"]
 HINDSIGHT_URL    = os.environ.get("HINDSIGHT_URL", "http://localhost:8888/mcp/")
-QDRANT_URL       = os.environ.get("QDRANT_URL",    "http://localhost:6333")
+QDRANT_URL       = os.environ.get("QDRANT_URL",    "http://10.11.1.40:6333")
 OPENAI_KEY       = os.environ.get("OPENAI_API_KEY", "")
+EMBEDDING_API_BASE = os.environ.get("EMBEDDING_API_BASE", "http://localhost:8081/v1")
+EMBEDDING_MODEL    = os.environ.get("EMBEDDING_MODEL",    "jina-embed")
 COLLECTION       = "verse_emails"
-VECTOR_SIZE      = 1536
+VECTOR_SIZE      = 2048
 PROGRESS_FILE    = os.path.expanduser("~/.claude/skills/hcl-verse-RAG/backfill_progress.json")
 PAGE_SIZE        = 100
 SAVE_EVERY       = 50   # 每 N 封存一次進度
@@ -149,7 +151,7 @@ def extract_attachments(payload):
 
 def get_embedding(text, client):
     res = client.embeddings.create(
-        model="text-embedding-3-small",
+        model=EMBEDDING_MODEL,
         input=text[:8000],
     )
     return res.data[0].embedding
@@ -204,7 +206,7 @@ def main():
 
     print("初始化 Qdrant / Hindsight / OpenAI...")
     qdrant       = QdrantClient(url=QDRANT_URL)
-    openai_cli   = OpenAI(api_key=OPENAI_KEY)
+    openai_cli   = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
     hindsight    = HindsightClient(HINDSIGHT_URL) if not args.dry_run else None
     ensure_collection(qdrant)
 
