@@ -1,24 +1,29 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-HCL Verse 甇豢? pipeline
+HCL Verse 歸檔 pipeline
 ======================
-敺?4Done???冗????嚗??冽?+?辣 ??撱?RAG 蝝Ｗ?(Qdrant) + 摮? .eml
-????摰宏?啜omdom???冗嚗宏?箔?皞?= 憭拍?駁?皜豢?嚗?
+從「04Done」資料夾逐封處理：抓全文+附件 → 建 RAG 索引(Qdrant) + 存成 .eml
+→ 處理完移到「domdom」資料夾（移出來源 = 天然去重游標）。
 
-?冽?嚗?
+討論串（thread）拆成「訊息級」處理：每則訊息各自用 Domino UNID 當
+document_id（不是 hash 畫面文字），RAG/Hindsight 各自獨立一筆；
+每則訊息的引用歷史（quote-in-body）會被截斷，避免重複內容灌爆 Hindsight。
+EML 匯出仍是整串完整存檔（不截斷），供人工回溯查閱原始信件。
+
+用法：
     python3 verse_archive_pipeline.py [max_results] [--no-move] [--headful]
 
-    max_results   ??銝?嚗?閮?50
-    --no-move     ?芸? EML+RAG嚗?蝘餃?靽∩辣嚗葫閰衣嚗????唬縑蝞梧?
-    --headful     憿舐內?汗?刻?蝒??日?剁??身 headless嚗?
+    max_results   處理上限，預設 50
+    --no-move     只做 EML+RAG，不移動信件（測試用，不會動到信箱）
+    --headful     顯示瀏覽器視窗（除錯用；預設 headless）
 """
-import os, sys, re, json, hashlib, warnings, urllib.parse
+import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse, subprocess
 from datetime import datetime, timedelta
 import requests
 from email.message import EmailMessage
 import email.policy
 from email.utils import formatdate
-warnings.filterwarnings('ignore')  # ???折 SSL ??霅血?
+warnings.filterwarnings('ignore')  # 關閉內部 SSL 憑證警告
 
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
@@ -34,8 +39,17 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from openai import OpenAI
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.expanduser("~/Claude/HCL"))
-from project_keywords import match_project
+from quote_stripper import strip_quoted_history
+from email_mapping import email_to_name, resolve_me
+from external_contacts_tracker import (
+    load_state as load_contacts_state,
+    save_state as save_contacts_state,
+    track_unknown_contact,
+    has_new_or_updated as contacts_have_new_or_updated,
+)
+from external_contacts_excel import generate_excel as generate_contacts_excel
 
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://localhost:8888/mcp/")
 
@@ -64,7 +78,7 @@ class HindsightClient:
                 return json.loads(line[5:])
         return {}
 
-# ?? 閮剖? ???????????????????????????????????????????????????????????????????
+# ── 設定 ───────────────────────────────────────────────────────────────────
 PORTAL_URL    = os.environ.get("HCL_PORTAL_URL", "https://portal.ecic.com.tw/app/eip.nsf/XPortal.xsp")
 VERSE_URL     = os.environ.get("HCL_VERSE_URL",  "https://mail1.ecic.com.tw/verse")
 USERNAME      = os.environ.get("HCL_USERNAME",    "shuhsing")
@@ -76,9 +90,11 @@ SOURCE_FOLDER = "04Done"
 TARGET_FOLDER = "domdom"
 COLLECTION    = "verse_emails"
 VECTOR_SIZE   = 1536
-OUTPUT_FILE   = "/tmp/verse_archive_pipeline_result.json"
+OUTPUT_FILE   = os.path.join(tempfile.gettempdir(), "verse_archive_pipeline_result.json")
 
-# ?? ?閫?? ?????????????????????????????????????????????????????????????????
+MY_EMAIL, MY_NAME = resolve_me(USERNAME)  # 目前登入帳號 -> (email, 姓名)，取代寫死 shuhsing
+
+# ── 參數解析 ─────────────────────────────────────────────────────────────────
 _args     = [a for a in sys.argv[1:] if not a.startswith("--")]
 _flags    = {a for a in sys.argv[1:] if a.startswith("--")}
 MAX_RESULTS = int(_args[0]) if _args else 50
@@ -86,12 +102,26 @@ NO_MOVE     = "--no-move" in _flags
 HEADFUL     = "--headful" in _flags
 OUTPUT_DIR  = os.path.expanduser("~/verse-export")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+EXTERNAL_CONTACTS_XLSX = os.path.join(OUTPUT_DIR, "external_contacts.xlsx")
+
+# 每個帳號對應的 Google Chat space（沿用 hcl-notes-approval 的「使用者對照表」）
+GOOGLE_CHAT_SPACES = {
+    "shuhsing": "h2YgpyAAAAE",
+    "tzuyu":    "8DyTYKAAAAE",
+    "ycmu":     "5tOqwKAAAAE",
+}
+NOTIFY_SPACE = GOOGLE_CHAT_SPACES.get(USERNAME, "h2YgpyAAAAE")
+# 專案根目錄（.../HCL），從這支腳本的路徑往上推 4 層算出來，找 hcl_write_hindsight.py 用
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+NOTIFY_SCRIPT = os.path.join(
+    _PROJECT_ROOT, ".claude", "commands", "hcl-notes-approval", "scripts", "hcl_write_hindsight.py")
 
 qdrant        = QdrantClient(url=QDRANT_URL)
 openai_client = OpenAI(api_key=OPENAI_KEY)
 
 
-# ?? Qdrant / embedding / id ????????????????????????????????????????????????
+# ── Qdrant / embedding / id ────────────────────────────────────────────────
 def ensure_collection():
     existing = {c.name for c in qdrant.get_collections().collections}
     if COLLECTION not in existing:
@@ -99,16 +129,22 @@ def ensure_collection():
             COLLECTION,
             vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
         )
-        print(f"撱箇? Qdrant collection: {COLLECTION}")
+        print(f"建立 Qdrant collection: {COLLECTION}")
 
 
 def make_id(subject, sender, date):
+    """訊息級 UNID 抓不到時的備援 id（不理想，僅防止整批失敗）。"""
     return hashlib.md5(f"{sender}|{subject}|{date}".encode()).hexdigest()
+
+
+def make_row_signature(subject, sender, snippet):
+    """安全閥用的『這一列信件』簽章，跟訊息級 id 無關。"""
+    return hashlib.md5(f"{sender}|{subject}|{snippet}".encode()).hexdigest()
 
 
 def make_thread_id(subject):
     normalized = re.sub(
-        r'^(??[:嚗\s*|RE[:嚗\s*|FW[:嚗\s*|Fwd[:嚗\s*)+',
+        r'^(回覆[:：]\s*|RE[:：]\s*|FW[:：]\s*|Fwd[:：]\s*)+',
         '', subject, flags=re.IGNORECASE
     ).strip()
     return hashlib.md5(normalized.encode()).hexdigest()
@@ -121,14 +157,14 @@ def id_to_uuid(h):
 
 try:
     import tiktoken
-    _ENC = tiktoken.get_encoding("cl100k_base")  # text-embedding-3-* ?函?蝺函Ⅳ
+    _ENC = tiktoken.get_encoding("cl100k_base")  # text-embedding-3-* 用的編碼
 except Exception:
     _ENC = None
 
-EMBED_TOKEN_LIMIT = 8000  # 璅∪?銝? 8192嚗?蝺抵?
+EMBED_TOKEN_LIMIT = 8000  # 模型上限 8192，留緩衝
 
 def get_embedding(text):
-    # ?瑁?隢葡?航頞? 8192 token 銝? ??蝎暹??芣嚗iktoken 銝?冽??典??蝎摯嚗?
+    # 長討論串可能超過 8192 token 上限 → 精準截斷（tiktoken 不可用時用字元數粗估）
     if _ENC is not None:
         toks = _ENC.encode(text)
         if len(toks) > EMBED_TOKEN_LIMIT:
@@ -139,20 +175,48 @@ def get_embedding(text):
     return res.data[0].embedding
 
 
-# ?? ?交?甇???????????????????????????????????????????????????????????????????
-# Verse ??.pim-mailread-sentdate 撠??縑隞嗆??撟港遢嚗? "Wed, Jun 10 9:13 AM"嚗?
-# 銝?隢葡憿舐內????唬???????摰迤閬???ISO嚗撩撟港遢撠望蝞?
+# ── 身份解析（me / email <-> 姓名）──────────────────────────────────────────
+def resolve_sender(raw):
+    """回傳 (email, name, found_in_directory)。raw 可能是 'me'、'name <email>'、
+    或純文字姓名。found_in_directory=False 代表 email_mapping 查不到這個 email
+    （外部聯絡人/離職同仁），呼叫端應該把它記進待確認名單。"""
+    raw = (raw or '').strip()
+    if not raw:
+        return '', '', True
+    if raw == 'me':
+        return MY_EMAIL, MY_NAME, True
+    m = re.match(r'^"?([^"<>]*)"?\s*<([^<>]+)>$', raw)
+    if m:
+        display, addr = m.group(1).strip(), m.group(2).strip()
+        name = email_to_name(addr)
+        found = (name != addr)
+        if not found:  # 通訊錄查不到，用畫面上的顯示名頂著
+            name = display or addr
+        return addr, name, found
+    return '', raw, True  # 沒有 email 可查，無法追蹤，視為不需處理
+
+
+def substitute_me(raw):
+    """把收件人/副本字串裡的獨立 'me' 換成目前登入帳號的 email（不再寫死 shuhsing）。"""
+    if not raw:
+        return raw
+    return re.sub(r'(?<![\w@.])me(?![\w@.])', MY_EMAIL or 'me', raw)
+
+
+# ── 日期正規化 ───────────────────────────────────────────────────────────────
+# Verse 的 .pim-mailread-sentdate 對近期信件會省略年份（如 "Wed, Jun 10 9:13 AM"），
+# 且討論串顯示的是「最新一則」的時間。把它正規化成 ISO，缺年份就推算。
 _MONTHS = {m: i + 1 for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
 
 def normalize_sent_date(raw, today=None):
-    """??Verse 憿舐內???銝脫迤閬???'YYYY-MM-DD HH:MM'嚗? 'YYYY-MM-DD'嚗瘜圾?? ''??""
+    """把 Verse 顯示的日期字串正規化成 'YYYY-MM-DD HH:MM'（或 'YYYY-MM-DD'）。無法解析回 ''。"""
     if not raw:
         return ""
     today = today or datetime.now()
     s = raw.replace("\n", " ").strip()
 
-    # ?詨??伐?Today / Yesterday / Tomorrow
+    # 相對日：Today / Yesterday / Tomorrow
     rel = None
     if re.search(r"\bYesterday\b", s, re.I): rel = -1
     elif re.search(r"\bToday\b", s, re.I):   rel = 0
@@ -174,17 +238,17 @@ def normalize_sent_date(raw, today=None):
             if num.group(3):
                 year = int(num.group(3))
 
-    # ??嚗??AM/PM ?葉??銝?/銝?嚗?
+    # 時間（支援 AM/PM 與中文 上午/下午）
     hh = mm = None
     tm = re.search(r"\b(\d{1,2}):(\d{2})\b", s)
     if tm:
         hh = int(tm.group(1)); mm = int(tm.group(2))
-        is_pm = bool(re.search(r"PM|銝?", s, re.I))
-        is_am = bool(re.search(r"AM|銝?", s, re.I))
+        is_pm = bool(re.search(r"PM|下午", s, re.I))
+        is_am = bool(re.search(r"AM|上午", s, re.I))
         if is_pm and hh < 12: hh += 12
         if is_am and hh == 12: hh = 0
 
-    # ?詨??亙????
+    # 相對日優先處理
     if rel is not None and mon is None:
         d = today + timedelta(days=rel)
         mon, day, year = d.month, d.day, d.year
@@ -201,13 +265,13 @@ def normalize_sent_date(raw, today=None):
     return dt.strftime("%Y-%m-%d %H:%M") if hh is not None else dt.strftime("%Y-%m-%d")
 
 
-# ?? ?餃 + ?脫?摰??冗 ??????????????????????????????????????????????????????
+# ── 登入 + 進指定資料夾 ──────────────────────────────────────────────────────
 def login(page):
     page.goto(PORTAL_URL)
     page.wait_for_load_state("networkidle")
     page.fill('input[type="text"], input[placeholder*="Email"], input[name*="user"]', USERNAME)
     page.fill('input[type="password"]', PASSWORD)
-    page.click('button[type="submit"], input[type="submit"], button:has-text("?餃")')
+    page.click('button[type="submit"], input[type="submit"], button:has-text("登入")')
     page.wait_for_load_state("networkidle")
     page.goto(VERSE_URL)
     page.wait_for_load_state("networkidle")
@@ -217,16 +281,16 @@ def login(page):
 
 def open_folder(page, folder_name):
     """
-    暺?撌血鞈?憭暹邦銝剖???folder_name ???冗嚗??亙靽∩辣皜??
-    Inbox ??撅?class `.inbox`嚗閮??冗嚗? 04Done嚗?賡???暺?
-    銝?質??具??冗 / Folders??黎蝯ㄐ嚗?????
+    點擊左側資料夾樹中名為 folder_name 的資料夾，載入其信件清單。
+    Inbox 有專屬 class `.inbox`；自訂資料夾（如 04Done）只能靠名字點，
+    且可能藏在「資料夾 / Folders」摺疊群組裡，需先展開。
     """
-    # 1) ??閰血????冗 / Folders?黎蝯??亙??其??芸???
+    # 1) 先嘗試展開「資料夾 / Folders」群組（若存在且未展開）
     page.evaluate("""(name) => {
         const groups = [...document.querySelectorAll('[role="treeitem"], .folder-group, .nav-group')];
         for (const g of groups) {
             const t = (g.innerText || '').trim();
-            if (/^(鞈?憭魯Folders|My Folders|?犖鞈?憭?/.test(t)) {
+            if (/^(資料夾|Folders|My Folders|個人資料夾)/.test(t)) {
                 const exp = g.getAttribute('aria-expanded');
                 if (exp === 'false') {
                     const toggle = g.querySelector('[aria-expanded], .twisty, .expand') || g;
@@ -237,7 +301,7 @@ def open_folder(page, folder_name):
     }""", folder_name)
     page.wait_for_timeout(800)
 
-    # 2) ?典椰?游??芸??曉 folder_name ??treeitem 銝阡?????喳 move popup嚗?
+    # 2) 在左側導航區找含 folder_name 的 treeitem 並點擊（排除右側 move popup）
     candidates = page.locator(
         f'.application-frame [role="treeitem"]:has-text("{folder_name}"), '
         f'nav [role="treeitem"]:has-text("{folder_name}"), '
@@ -251,7 +315,7 @@ def open_folder(page, folder_name):
             txt = el.inner_text(timeout=1500).strip()
         except Exception:
             continue
-        # ??摮??亥?鞈?憭曉????踹?暺?怨府摮?靽∩辣???嗡??嚗?
+        # 取文字最接近資料夾名的（避免點到含該字的信件列或其他項目）
         first_line = txt.split('\n')[0].strip()
         if folder_name in first_line:
             target = el
@@ -260,30 +324,30 @@ def open_folder(page, folder_name):
         target = candidates.first  # fallback
 
     if target is None:
-        # dump 撠 DOM 靘??
+        # dump 導航 DOM 供除錯
         nav_dump = page.evaluate("""() => {
             return [...document.querySelectorAll('[role="treeitem"]')]
                 .map(el => (el.className || '') + ' :: ' + (el.innerText || '').split('\\n')[0].trim())
                 .slice(0, 60);
         }""")
         raise RuntimeError(
-            f"?曆??啗??冗?folder_name}???treeitem 皜嚗n  " +
+            f"找不到資料夾「{folder_name}」。目前 treeitem 清單：\n  " +
             "\n  ".join(nav_dump)
         )
 
     target.scroll_into_view_if_needed()
     target.click()
     page.wait_for_timeout(1500)
-    # 蝑縑隞嗆??桀?橘?蝛箄??冗????嚗策頛 timeout嚗?
+    # 等信件清單出現（空資料夾則不會有，給較短 timeout）
     try:
         page.wait_for_selector('.seq-msg-row', timeout=8000)
     except Exception:
         pass
-    # 蝑???摮葡??????"Subject" ?? ready嚗??憭?~6s
+    # 等首列文字渲染完成（含 "Subject" 才算 ready），最多 ~6s
     for _ in range(12):
         try:
             if page.locator('.seq-msg-row').count() == 0:
-                break  # 蝛箄??冗
+                break  # 空資料夾
             t = page.locator('.seq-msg-row').first.inner_text(timeout=1500)
             if "Subject" in t:
                 break
@@ -293,13 +357,14 @@ def open_folder(page, folder_name):
     page.wait_for_timeout(500)
 
 
-# ?? 靽∩辣閫?? / 皜?嚗窒??index + export ?Ｘ??摩嚗????????????????????????????
+# ── 信件解析 / 清理（沿用 index + export 既有邏輯）────────────────────────────
 UI_NOISE = {
     "More actions", "Mark as unread", "Mark as Needs Action",
     "Move to Trash", "Move to folder", "Open in new window",
     "Close", "Reply", "Reply All", "Forward", "Inbox",
     "Show more", "Show less", "Mark all as read", "Move all to Trash",
     "THREAD ACTIONS:", "Toggle message open/close",
+    SOURCE_FOLDER, TARGET_FOLDER,
 }
 
 _DATE_PATS = [
@@ -314,6 +379,7 @@ def is_date_line(s):
 
 
 def clean_body(raw, subject):
+    """先剝 UI chrome 雜訊，再砍掉引用歷史（quote_stripper）。"""
     lines = raw.split("\n")
     cleaned, found = [], False
     for line in lines:
@@ -330,7 +396,8 @@ def clean_body(raw, subject):
             if re.match(r'^.{1,40}\s+to\s+(me|you)\b', s):
                 continue
             cleaned.append(line)
-    return "\n".join(cleaned).strip()
+    body = "\n".join(cleaned).strip()
+    return strip_quoted_history(body)
 
 
 def parse_msg_row(item):
@@ -352,6 +419,7 @@ def parse_msg_row(item):
 
 
 def extract_header_fields(page):
+    """整串（thread 級）的表頭，目前抓到的是最新/最上面那則——給 EML 用。"""
     page.evaluate("""() => {
         const c = document.querySelector('.preview-container');
         if (!c) return;
@@ -359,7 +427,7 @@ def extract_header_fields(page):
         if (btn) btn.click();
     }""")
     page.wait_for_timeout(500)
-    return page.evaluate(r"""() => {
+    header = page.evaluate(r"""() => {
         const c = document.querySelector('.preview-container');
         if (!c) return {};
         const senderEls = [...c.querySelectorAll('.socpimMailSender')];
@@ -393,7 +461,7 @@ def extract_header_fields(page):
                      : rawTocc.includes('To:')  ? rawTocc : '';
         if (rawSrc) {
             const parsed = parseFromTo(rawSrc);
-            to  = parsed.to.replace(/^me$/, 'shuhsing@ecic.com.tw');
+            to  = parsed.to;
             cc  = parsed.cc;
             bcc = parsed.bcc;
         }
@@ -411,9 +479,120 @@ def extract_header_fields(page):
         });
         return { from, to, cc, bcc, date, label_ids: [...labelSet] };
     }""")
+    # 「me」換成目前登入帳號的 email（不再寫死 shuhsing）
+    header["to"] = substitute_me(header.get("to", ""))
+    header["cc"] = substitute_me(header.get("cc", ""))
+    header["bcc"] = substitute_me(header.get("bcc", ""))
+    return header
 
 
-# ?? ?辣銝? / EML ??嚗窒??export ?摩嚗????????????????????????????????????
+# ── 訊息級拆分：Domino UNID + 逐則抓 header/body ──────────────────────────────
+UNID_RE = re.compile(r'/0/([0-9A-Fa-f]{32})/\?OpenDocument')
+
+
+def open_row_and_get_block_unids(page, row_locator):
+    """
+    點開一列信件，同時攔截每則訊息展開時打出的 OpenDocument 請求，
+    取得跟 `.preview-container [aria-expanded]` DOM 順序一一對應的 UNID 陣列。
+    UNID 是 Domino 文件本身的 id，不受帳號/資料夾/畫面顯示格式影響，
+    比 hash(寄件人|主旨|日期) 可靠（跨帳號、跨資料夾重複開同一封都會拿到同一個值）。
+    """
+    captured = []
+
+    def on_request(req):
+        m = UNID_RE.search(req.url)
+        if m:
+            captured.append(m.group(1))
+
+    page.on("request", on_request)
+    try:
+        row_locator.click()
+        page.wait_for_timeout(2000)
+
+        n = page.evaluate(
+            "() => document.querySelectorAll('.preview-container [aria-expanded]').length"
+        )
+        block_unid = [None] * n
+
+        # 一進來就展開的那則（通常是最新一則），它的 OpenDocument 請求在 click() 時就打了
+        states = page.evaluate(
+            "() => [...document.querySelectorAll('.preview-container [aria-expanded]')]"
+            ".map(el => el.getAttribute('aria-expanded'))"
+        )
+        pointer = 0
+        for i, st in enumerate(states):
+            if st == 'true' and pointer < len(captured):
+                block_unid[i] = captured[pointer]
+                pointer += 1
+
+        # 其餘一則一則展開，各自獨立等待+攔截，確保順序對得上
+        for idx in range(n):
+            if block_unid[idx] is not None:
+                continue
+            before = len(captured)
+            page.evaluate("""(i) => {
+                const els = [...document.querySelectorAll('.preview-container [aria-expanded]')];
+                const el = els[i];
+                if (el && el.getAttribute('aria-expanded') === 'false') el.click();
+            }""", idx)
+            page.wait_for_timeout(900)
+            new_ones = captured[before:]
+            block_unid[idx] = new_ones[-1] if new_ones else None
+
+        return block_unid, n
+    finally:
+        page.remove_listener("request", on_request)
+
+
+def extract_message_block(page, idx):
+    """抓第 idx 則訊息（`.preview-container [aria-expanded]` 的第 idx 個元素）自己的
+    sender/date/to/cc/bcc/body，跟其他訊息的內容互不干擾。"""
+    return page.evaluate(r"""(i) => {
+        const blocks = [...document.querySelectorAll('.preview-container [aria-expanded]')];
+        const b = blocks[i];
+        if (!b) return null;
+        const dateEl = b.querySelector('.pim-mailread-sentdate');
+        const date = dateEl ? dateEl.innerText.split('\n').map(s => s.trim()).filter(Boolean)
+            .reduce((a, x) => a.length >= x.length ? a : x, '') : '';
+        const senderEls = [...b.querySelectorAll('.socpimMailSender')];
+        let from = '';
+        for (const el of senderEls) {
+            const t = el.innerText.trim();
+            if (t && t !== 'Sent by:' && t.includes('<')) { from = t; break; }
+        }
+        if (!from) {
+            for (const el of senderEls) {
+                const t = el.innerText.trim();
+                if (t && t !== 'Sent by:') { from = t; break; }
+            }
+        }
+        function parseFromTo(raw) {
+            const toM  = raw.match(/To:\s*([\s\S]*?)(?:Cc:|Bcc:|Show less|$)/);
+            const ccM  = raw.match(/Cc:\s*([\s\S]*?)(?:Bcc:|Show less|$)/);
+            const bccM = raw.match(/Bcc:\s*([\s\S]*?)(?:Show less|$)/);
+            return {
+                to:  toM  ? toM[1].trim().replace(/\s+/g, ' ')  : '',
+                cc:  ccM  ? ccM[1].trim().replace(/\s+/g, ' ')  : '',
+                bcc: bccM ? bccM[1].trim().replace(/\s+/g, ' ') : '',
+            };
+        }
+        const recipEl = b.querySelector('.pim-mailread-recipient');
+        const toccEl  = b.querySelector('.pimToccbcc');
+        const rawRecip = recipEl ? recipEl.innerText : '';
+        const rawTocc  = toccEl  ? toccEl.innerText  : '';
+        const rawSrc = rawRecip.includes('To:') ? rawRecip
+                     : rawTocc.includes('To:')  ? rawTocc : '';
+        let to = '', cc = '', bcc = '';
+        if (rawSrc) {
+            const parsed = parseFromTo(rawSrc);
+            to = parsed.to; cc = parsed.cc; bcc = parsed.bcc;
+        }
+        const body = b.innerText || '';
+        return { from, to, cc, bcc, date, body };
+    }""", idx)
+
+
+# ── 附件下載 / EML 打包（沿用 export 邏輯，整串完整存檔，不截斷）────────────────
 def get_attachment_links(page):
     return page.evaluate("""() => {
         return [...document.querySelectorAll('.preview-container a[href]')]
@@ -431,7 +610,7 @@ def download_attachments(links, cookies):
             continue
         seen.add(att['href'])
         nm = (att['name'] or '').strip()
-        # nm ?箇征???芣鋆詨瑼?嚗df/xlsx/docx...嚗?嚗敺?URL ??FileName= ??瑼?
+        # nm 為空、或只是裸副檔名（pdf/xlsx/docx...）時，改從 URL 的 FileName= 取真檔名
         if not nm or re.fullmatch(r'[A-Za-z0-9]{2,5}', nm):
             try:
                 nm = urllib.parse.unquote(att['href'].split('FileName=')[1].split('&')[0])
@@ -445,7 +624,7 @@ def download_attachments(links, cookies):
 
 
 def _sent_date_to_rfc2822(sent_date):
-    """??'YYYY-MM-DD HH:MM' ??'YYYY-MM-DD' 頧? RFC 2822 ?澆?嚗仃???喟征摮葡??""
+    """把 'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD' 轉成 RFC 2822 格式；失敗回傳空字串。"""
     if not sent_date:
         return ''
     try:
@@ -472,14 +651,59 @@ def pack_eml(meta, body, attachments):
 
 
 def safe_filename(subject):
-    return re.sub(r'[^\w銝-橦璞-_]', '_', subject)[:60]
+    return re.sub(r'[^\w一-鿿\-_]', '_', subject)[:60]
 
 
-# ?? 蝘餃 domdom嚗窒??move_construction v1.2.2 璈嚗??????????????????????????
+# ── 未在通訊錄的聯絡人：Google Chat 通知（重用 hcl_write_hindsight.py --notify-only）──
+def notify_new_contacts_via_chat(state_before, state_after, xlsx_path, space=NOTIFY_SPACE):
+    """
+    比較這次跑完後有哪些聯絡人是新增或有更新（次數/顯示名變動），組一段摘要文字，
+    呼叫既有的 hcl_write_hindsight.py --notify-only 機制發 Google Chat 通知。
+    不重新設計通知管道——沿用簽核通知已經接好的 n8n webhook。
+    沒有新增/更新時回傳 None（不發通知）。
+    """
+    changed = []
+    for email, info in state_after.items():
+        if info.get("confirmed"):
+            continue
+        old = state_before.get(email)
+        if old is None:
+            changed.append((email, info, "新"))
+        elif (set(info.get("seen_names", [])) != set(old.get("seen_names", []))
+              or info.get("count") != old.get("count")):
+            changed.append((email, info, "更新"))
+
+    if not changed:
+        return None
+
+    lines = [f"📋 Verse 歸檔發現 {len(changed)} 位未在通訊錄的聯絡人待確認姓名：", ""]
+    for email, info, tag in changed:
+        names = "、".join(info.get("seen_names", []))
+        lines.append(f"- [{tag}] {email}（{names}，共 {info.get('count')} 次）")
+    lines.append("")
+    lines.append(f"請開啟 {xlsx_path} 填寫 canonical_name 欄位，填完跟我說一聲。")
+    text = "\n".join(lines)
+
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".md")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        result = subprocess.run(
+            [sys.executable, NOTIFY_SCRIPT, "--notify-only",
+             "--notify-file", tmp_path, "--space", space],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
+        return result.returncode == 0
+    finally:
+        os.unlink(tmp_path)
+
+
+# ── 移到 domdom（沿用 move_construction v1.2.2 機制）──────────────────────────
 def move_to_folder(page, folder=TARGET_FOLDER):
-    """?身?格?靽∩辣撌脰◤?詨?嚗eading pane 撌脤?嚗?鞈?憭?icon ??頛詨?迂 ???詨???""
-    # ?湔??瘥?靽∠??ove to folder???祈澈嚗lass ?箏?嚗?銝?鞈渡撅?action-tray-populated
-    # 嚗nbox 瑼Ｚ??嗅惜??.action-tray-populated嚗??冗瑼Ｚ?瘝? ??銝?函撅斗?撠?
+    """假設目標信件已被選取（reading pane 已開）。點資料夾 icon → 輸入名稱 → 選取。"""
+    # 直接鎖定每封信的「Move to folder」鈕本身（class 固定），不依賴父層 action-tray-populated
+    # （Inbox 檢視父層有 .action-tray-populated，資料夾檢視沒有 → 不能用父層比對）
     MOVE_BTN_SEL = "button.action.pim-move-to-folder.icon"
     try:
         page.wait_for_selector(MOVE_BTN_SEL, timeout=12000)
@@ -487,7 +711,7 @@ def move_to_folder(page, folder=TARGET_FOLDER):
         pass
     page.wait_for_timeout(300)
 
-    # ?閬????????梯?????button嚗?
+    # 取可見的那一個（排除隱藏的同名 button）
     move_btn = None
     btns = page.locator(MOVE_BTN_SEL)
     for i in range(btns.count()):
@@ -532,163 +756,217 @@ def move_to_folder(page, folder=TARGET_FOLDER):
     return "moved"
 
 
-# ?? 銝餅?蝔????????????????????????????????????????????????????????????????????
-def process_current_email(page):
-    """?格?靽∩辣撌脤?????header+body+?辣嚗???(email_dict, attachments)??""
-    page.evaluate(
-        "() => { [...document.querySelectorAll("
-        "'.preview-container [aria-expanded=\"false\"]')].forEach(b => b.click()); }"
-    )
-    page.wait_for_timeout(800)
-
-    header = extract_header_fields(page)
-    raw    = page.locator('.preview-container').inner_text().strip()
-    return header, raw
-
-
+# ── 主流程 ───────────────────────────────────────────────────────────────────
 def main():
     ensure_collection()
     hindsight = HindsightClient(HINDSIGHT_URL)
     results = []
-    seen_ids = set()
+    seen_rows = set()
+
+    # 未在 email_mapping 查到的聯絡人（外部廠商/離職同仁）追蹤用；deep copy 一份
+    # 起始快照，跑完後拿來比對這次有沒有新增/更新，決定要不要重新產生 Excel + 通知
+    contacts_state_before = load_contacts_state()
+    contacts_state = json.loads(json.dumps(contacts_state_before))
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=not HEADFUL, channel="msedge")
-        ctx = browser.new_context(viewport={"width": 1280, "height": 900}, ignore_https_errors=True)
+        ctx = browser.new_context(viewport={"width": 1280, "height": 900}, ignore_https_errors=True, locale="en-US")
         page = ctx.new_page()
         page.set_default_timeout(60000)
         try:
-            print("?餃 HCL Verse...")
+            print("登入 HCL Verse...")
             login(page)
-            print(f"??鞈?憭整SOURCE_FOLDER}??..")
+            print(f"開啟資料夾「{SOURCE_FOLDER}」...")
             open_folder(page, SOURCE_FOLDER)
 
             count = page.locator('.seq-msg-row').count()
-            print(f"?SOURCE_FOLDER}??閬?{count} 撠?????嚗???{MAX_RESULTS}"
-                  f"{'嚗?-no-move 銝宏?? if NO_MOVE else ''}嚗?..\n")
+            print(f"「{SOURCE_FOLDER}」目前可見 {count} 封，開始處理（上限 {MAX_RESULTS}"
+                  f"{'，--no-move 不移動' if NO_MOVE else ''}）...\n")
 
             processed = 0
             while processed < MAX_RESULTS:
                 rows = page.locator('.seq-msg-row')
                 if rows.count() == 0:
-                    print("鞈?憭曉歇皜征嚗???)
+                    print("資料夾已清空，結束。")
                     break
 
                 item = rows.first
                 meta = None
-                for _ in range(6):  # 擐??航?皜脫?嚗?閰?
+                for _ in range(6):  # 首列可能還在渲染，重試
                     meta = parse_msg_row(item)
                     if meta:
                         break
                     page.wait_for_timeout(600)
                     item = page.locator('.seq-msg-row').first
                 if not meta:
-                    print("  ?? ?⊥?閫??蝚砌????迫??)
+                    print("  ⚠️ 無法解析第一列，停止。")
                     break
 
-                # 暺?
-                item.click()
-                page.wait_for_timeout(2000)
-
-                header, raw = process_current_email(page)
-                body      = clean_body(raw, meta["subject"])
-                sender    = header.get("from") or meta["sender"]
-                date_str  = header.get("date") or ""          # Verse 憿舐內??嚗?賜撩撟港遢嚗?
-                sent_date = normalize_sent_date(date_str)      # 甇????ISO 撖辣??
-                email_id  = make_id(meta["subject"], sender, date_str)
-
-                # 摰?伐??仿?撌脰???嚗誨銵其?銝頛芰宏?仃??摰??券??剁????迫?踹??⊿?餈游?
-                if email_id in seen_ids:
-                    print(f"  ?? ?菜葫?圈?銴縑隞塚?蝘餃??航憭望?嚗??迫嚗meta['subject'][:40]}")
+                # 安全閥：若這一列跟上一輪處理過的一樣（代表移動失敗它還在頂部）→ 停止
+                row_sig = make_row_signature(meta["subject"], meta["sender"], meta["snippet"])
+                if row_sig in seen_rows:
+                    print(f"  ⚠️ 偵測到重複信件（移動可能失敗），停止：{meta['subject'][:40]}")
                     break
-                seen_ids.add(email_id)
+                seen_rows.add(row_sig)
 
-                email = {
-                    "id": email_id, "subject": meta["subject"],
-                    "snippet": meta["snippet"] or body[:200], "body": body,
-                    "from": sender, "to": header.get("to", ""),
-                    "cc": header.get("cc", ""), "bcc": header.get("bcc", ""),
-                    "date": date_str, "sent_date": sent_date,
-                    "thread_id": make_thread_id(meta["subject"]),
-                    "label_ids": header.get("label_ids", []),
-                }
+                # 點開 + 展開全部訊息 + 攔截每則的 Domino UNID
+                block_unids, n_blocks = open_row_and_get_block_unids(page, item)
 
-                rec = {"subject": meta["subject"], "from": sender,
-                       "date": date_str, "sent_date": sent_date}
+                # 整串（thread 級）header/raw，給 EML 完整存檔用（不截斷）
+                thread_header = extract_header_fields(page)
+                thread_raw    = page.locator('.preview-container').inner_text().strip()
+                thread_sender_email, thread_sender_name, thread_sender_found = resolve_sender(
+                    thread_header.get("from") or meta["sender"])
+                thread_date_str  = thread_header.get("date") or ""
+                thread_sent_date = normalize_sent_date(thread_date_str)
+                if thread_sender_email and not thread_sender_found:
+                    track_unknown_contact(thread_sender_email, thread_sender_name,
+                                           thread_sent_date, contacts_state)
+                thread_id = make_thread_id(meta["subject"])
 
-                # ??RAG 蝝Ｗ?
-                try:
-                    text = f"{email['subject']} {email['body'] or email['snippet']}"
-                    embedding = get_embedding(text)
-                    qdrant.upsert(collection_name=COLLECTION, points=[PointStruct(
-                        id=id_to_uuid(email["id"]), vector=embedding, payload=email)])
-                    rec["rag"] = "ok"
-                except Exception as e:
-                    rec["rag"] = f"fail: {e}"
-                    print(f"  ??RAG 憭望?嚗e}")
+                # 逐則訊息：各自 clean+砍引用歷史，各自獨立 RAG+Hindsight
+                messages = []
+                for idx in range(n_blocks):
+                    blk = extract_message_block(page, idx)
+                    if not blk:
+                        continue
+                    if not blk.get("date") and not blk.get("from"):
+                        # Verse 自己判定這則已被後面訊息的引用完整涵蓋，只給精簡摘要
+                        # （沒有完整表頭可抓）——不用重複處理
+                        continue
+                    body_clean = clean_body(blk["body"], meta["subject"])
+                    if len(body_clean) < 3:
+                        continue
+                    sender_email, sender_name, sender_found = resolve_sender(blk.get("from"))
+                    sent_date_for_block = normalize_sent_date(blk.get("date", ""))
+                    if sender_email and not sender_found:
+                        track_unknown_contact(sender_email, sender_name,
+                                               sent_date_for_block, contacts_state)
+                    unid = block_unids[idx] or make_id(
+                        meta["subject"], sender_email or sender_name, blk.get("date", ""))
+                    messages.append({
+                        "unid": unid,
+                        "sender_email": sender_email,
+                        "sender_name": sender_name,
+                        "to": substitute_me(blk.get("to", "")),
+                        "cc": substitute_me(blk.get("cc", "")),
+                        "date": blk.get("date", ""),
+                        "sent_date": normalize_sent_date(blk.get("date", "")),
+                        "body": body_clean,
+                    })
 
-                # ??EML ?臬
+                if not messages:
+                    # 保底：一則都沒抓到就退回整串當一則處理，避免整封信被跳過
+                    messages = [{
+                        "unid": make_id(meta["subject"], thread_sender_email, thread_date_str),
+                        "sender_email": thread_sender_email,
+                        "sender_name": thread_sender_name,
+                        "to": thread_header.get("to", ""),
+                        "cc": thread_header.get("cc", ""),
+                        "date": thread_date_str,
+                        "sent_date": thread_sent_date,
+                        "body": clean_body(thread_raw, meta["subject"]),
+                    }]
+
+                rec = {"subject": meta["subject"], "from": thread_sender_name,
+                       "date": thread_date_str, "sent_date": thread_sent_date,
+                       "message_count": len(messages)}
+
+                # ① RAG 索引 + ③ Hindsight retain（逐則訊息各自一筆）
+                rag_ok = hindsight_ok = 0
+                for m in messages:
+                    try:
+                        text = f"{meta['subject']} {m['body']}"
+                        embedding = get_embedding(text)
+                        qdrant.upsert(collection_name=COLLECTION, points=[PointStruct(
+                            id=id_to_uuid(m["unid"]),
+                            vector=embedding,
+                            payload={
+                                "subject": meta["subject"], "body": m["body"],
+                                "from_email": m["sender_email"], "from_name": m["sender_name"],
+                                "to": m["to"], "cc": m["cc"],
+                                "date": m["date"], "sent_date": m["sent_date"],
+                                "thread_id": thread_id, "unid": m["unid"],
+                            })])
+                        rag_ok += 1
+                    except Exception as e:
+                        print(f"  ✗ RAG 失敗（{m['sender_name']}）：{e}")
+
+                    try:
+                        tags = ["source:verse"]  # proj tag 先不分類，事後用同一個 document_id 補上（覆蓋 tags）
+                        hindsight.retain(
+                            content=(
+                                f"主旨：{meta['subject']}\n"
+                                f"寄件者：{m['sender_name']}"
+                                + (f" <{m['sender_email']}>" if m['sender_email'] else "")
+                                + f"\n日期：{m['sent_date']}\n\n{m['body']}"
+                            ),
+                            document_id=m["unid"],
+                            timestamp=m["sent_date"],
+                            tags=tags,
+                            metadata={
+                                "subject":    meta["subject"],
+                                "from_email": m["sender_email"],
+                                "from_name":  m["sender_name"],
+                                "to":         m["to"],
+                                "cc":         m["cc"],
+                                "thread_id":  thread_id,
+                                "unid":       m["unid"],
+                                "sent_date":  m["sent_date"],
+                            },
+                            context=f"HCL Verse 信件：主旨「{meta['subject']}」，寄件者 {m['sender_name']}",
+                        )
+                        hindsight_ok += 1
+                    except Exception as e:
+                        print(f"  ✗ Hindsight 失敗（{m['sender_name']}）：{e}")
+
+                rec["rag_ok"] = rag_ok
+                rec["hindsight_ok"] = hindsight_ok
+
+                # ② EML 匯出（整串完整存檔，不截斷，供人工回溯查閱）
                 try:
                     att_links   = get_attachment_links(page)
                     cookies     = {c['name']: c['value'] for c in page.context.cookies()}
                     attachments = download_attachments(att_links, cookies)
-                    eml_bytes   = pack_eml(email, body, attachments)
-                    eml_path    = os.path.join(OUTPUT_DIR, f"{safe_filename(meta['subject'])}.eml")
+                    eml_meta = {
+                        "from": thread_sender_email or thread_sender_name,
+                        "to": thread_header.get("to", ""), "cc": thread_header.get("cc", ""),
+                        "subject": meta["subject"], "date": thread_date_str,
+                        "sent_date": thread_sent_date,
+                    }
+                    eml_bytes = pack_eml(eml_meta, thread_raw, attachments)
+                    eml_path  = os.path.join(OUTPUT_DIR, f"{safe_filename(meta['subject'])}.eml")
                     with open(eml_path, 'wb') as f:
                         f.write(eml_bytes)
                     rec["eml"] = eml_path
                     rec["attachments"] = [a[0] for a in attachments]
                 except Exception as e:
                     rec["eml"] = f"fail: {e}"
-                    attachments = []
-                    print(f"  ??EML 憭望?嚗e}")
+                    print(f"  ✗ EML 失敗：{e}")
 
-                # ??Hindsight retain
-                try:
-                    proj = match_project(email["subject"], email["body"][:500])
-                    tags = ["source:verse"] + ([f"proj:{proj}"] if proj else [])
-                    hindsight.retain(
-                        content=f"銝餅嚗email['subject']}\n撖辣??{email['from']}\n?交?嚗email['sent_date']}\n\n{email['body']}",
-                        document_id=email["id"],
-                        timestamp=email["sent_date"],
-                        tags=tags,
-                        metadata={
-                            "subject":   email["subject"],
-                            "from":      email["from"],
-                            "thread_id": email["thread_id"],
-                            "eml_path":  rec.get("eml", ""),
-                            "gmail_id":  "",
-                            "label_ids": email["label_ids"],
-                            "sent_date": email["sent_date"],
-                        },
-                        context=f"HCL Verse 靽∩辣嚗蜓?具email['subject']}??撖辣??{email['from']}",
-                    )
-                    rec["hindsight"] = f"ok (proj:{proj})"
-                except Exception as e:
-                    rec["hindsight"] = f"fail: {e}"
-                    print(f"  ??Hindsight 憭望?嚗e}")
-
-                # ??蝘餃 domdom
+                # ④ 移到 domdom
                 if NO_MOVE:
                     rec["move"] = "skipped (--no-move)"
-                    print(f"[{processed+1}] ??{meta['subject'][:40]} "
-                          f"(RAG={rec.get('rag')}, ?辣{len(rec.get('attachments', []))}, 銝宏??")
+                    print(f"[{processed+1}] ✓ {meta['subject'][:40]} "
+                          f"({len(messages)} 則訊息, RAG {rag_ok}/{len(messages)}, "
+                          f"Hindsight {hindsight_ok}/{len(messages)}, 附件{len(rec.get('attachments', []))}, 不移動)")
                     results.append(rec)
                     processed += 1
-                    # --no-move 璅∪??⊥?蝘餃嚗????????撠????芾??洵銝撠???
-                    print("  嚗?-no-move 璅∪?嚗???桀??蝚砌?撠誑撽?瘚?嚗???")
+                    # --no-move 模式無法移出，否則會重複處理同一封 → 只處理第一封後停
+                    print("  （--no-move 模式：只處理目前頂部第一封以驗證流程，結束。）")
                     break
                 else:
                     status = move_to_folder(page, TARGET_FOLDER)
                     rec["move"] = status
-                    flag = "?? if status == "moved" else "??
+                    flag = "✓" if status == "moved" else "✗"
                     print(f"[{processed+1}] {flag} {meta['subject'][:40]} "
-                          f"(RAG={rec.get('rag')}, ?辣{len(rec.get('attachments', []))}, move={status})")
+                          f"({len(messages)} 則訊息, RAG {rag_ok}/{len(messages)}, "
+                          f"Hindsight {hindsight_ok}/{len(messages)}, move={status})")
                     if status != "moved":
                         results.append(rec)
-                        print("  ??蝘餃?憭望?嚗?甇Ｖ誑??銴???)
+                        print("  ✗ 移動失敗，停止以免重複處理。")
                         break
-                    page.wait_for_timeout(1500)  # 蝑??桀??
+                    page.wait_for_timeout(1500)  # 等清單刷新
 
                 results.append(rec)
                 processed += 1
@@ -697,25 +975,41 @@ def main():
             browser.close()
 
     moved        = sum(1 for r in results if r.get("move") == "moved")
-    rag_ok       = sum(1 for r in results if r.get("rag") == "ok")
-    hindsight_ok = sum(1 for r in results if (r.get("hindsight") or "").startswith("ok"))
+    rag_ok_total       = sum(r.get("rag_ok", 0) for r in results)
+    hindsight_ok_total = sum(r.get("hindsight_ok", 0) for r in results)
+    message_total      = sum(r.get("message_count", 0) for r in results)
     sent_dates = sorted(d[:10] for d in (r.get("sent_date") or "" for r in results) if d)
     summary = {
         "source": SOURCE_FOLDER, "target": TARGET_FOLDER,
         "no_move": NO_MOVE, "output_dir": OUTPUT_DIR,
-        "archived_date": datetime.now().strftime("%Y-%m-%d"),  # 甇豢?嚗神?伐???
+        "archived_date": datetime.now().strftime("%Y-%m-%d"),  # 歸檔（寫入）日
         "sent_date_range": (
             {"earliest": sent_dates[0], "latest": sent_dates[-1]} if sent_dates else None
-        ),  # ?祆靽∩辣撖阡?撖辣?亦???
-        "processed": len(results), "rag_ok": rag_ok, "hindsight_ok": hindsight_ok, "moved": moved,
+        ),  # 本批信件實際寄件日範圍
+        "processed": len(results), "message_total": message_total,
+        "rag_ok": rag_ok_total, "hindsight_ok": hindsight_ok_total, "moved": moved,
         "emails": results,
     }
     with open(OUTPUT_FILE, "w") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    print(f"\n??摰?嚗???{len(results)} 撠?RAG {rag_ok} / Hindsight {hindsight_ok} ??嚗宏??{moved} 撠???{TARGET_FOLDER}")
-    print(f"  蝯?撌脣神??{OUTPUT_FILE}")
+    print(f"\n✓ 完成：處理 {len(results)} 封（共 {message_total} 則訊息），"
+          f"RAG {rag_ok_total}/{message_total} / Hindsight {hindsight_ok_total}/{message_total} 成功，"
+          f"移動 {moved} 封 → {TARGET_FOLDER}")
+    print(f"  結果已寫入 {OUTPUT_FILE}")
+
+    # 未在 email_mapping 查到的聯絡人：有新增/更新才存檔 + 重新產生 Excel + 通知 Google Chat
+    if contacts_state != contacts_state_before:
+        save_contacts_state(contacts_state)
+    if contacts_have_new_or_updated(contacts_state_before, contacts_state):
+        n_pending = generate_contacts_excel(contacts_state, EXTERNAL_CONTACTS_XLSX)
+        print(f"  外部聯絡人待確認清單更新：{n_pending} 位，已寫入 {EXTERNAL_CONTACTS_XLSX}")
+        try:
+            notified = notify_new_contacts_via_chat(
+                contacts_state_before, contacts_state, EXTERNAL_CONTACTS_XLSX)
+            print(f"  Google Chat 通知：{'已發送' if notified else '略過（無變動）'}")
+        except Exception as e:
+            print(f"  ✗ Google Chat 通知失敗：{e}")
 
 
 if __name__ == "__main__":
     main()
-
