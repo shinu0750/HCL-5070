@@ -84,7 +84,7 @@ class HindsightClient:
                 return json.loads(line[5:])
         raise RuntimeError(f"無法解析回應：{resp.text[:200]}")
 
-    def retain(self, content, document_id, timestamp, tags, metadata, context, bank_id="shuhsing"):
+    def retain(self, content, document_id, timestamp, tags, metadata, context, bank_id="EID"):
         return self._call("retain", {
             "content":     content,
             "document_id": document_id,

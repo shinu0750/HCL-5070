@@ -24,8 +24,13 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Windows 主控台預設用 cp950（Big5），印不出 ✓/✗/📧 等符號會直接 UnicodeEncodeError 崩潰
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # ── 固定路徑（沿用既有 OAuth 設定）────────────────────────────────────────────
-GMAIL_DIR        = "/Users/shuhsing/Documents/eml to gamil"
+GMAIL_DIR        = os.path.expanduser("~/Documents/eml to gamil")
 CREDENTIALS_FILE = os.path.join(GMAIL_DIR, "credentials.json")
 TOKEN_FILE       = os.path.join(GMAIL_DIR, "token.json")
 SCOPES           = ['https://www.googleapis.com/auth/gmail.modify']

@@ -28,6 +28,11 @@ import email.policy
 from email.utils import formatdate
 warnings.filterwarnings('ignore')  # 關閉內部 SSL 憑證警告
 
+# Windows 主控台預設用 cp950（Big5），印不出 ✓/✗ 等符號會直接 UnicodeEncodeError 崩潰
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
     with open(_env_path) as f:
@@ -114,6 +119,9 @@ HEADFUL     = "--headful" in _flags
 OUTPUT_DIR  = os.path.expanduser("~/verse-export")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 EXTERNAL_CONTACTS_XLSX = os.path.join(OUTPUT_DIR, "external_contacts.xlsx")
+# 附件另存一份（跟 .eml 分開），全部平放同一個資料夾，檔名前綴 unid 避免同名衝突
+ATTACHMENTS_DIR = os.path.join(OUTPUT_DIR, "attachments")
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 # 每個帳號對應的 Google Chat space（沿用 hcl-notes-approval 的「使用者對照表」）
 GOOGLE_CHAT_SPACES = {
@@ -709,6 +717,26 @@ def download_attachments(links, cookies):
     return attachments
 
 
+def safe_attachment_filename(name):
+    """磁碟檔名安全化：只擋 Windows 檔名不合法字元，不像 safe_filename() 那樣把非英數字
+    全部替換掉——附件檔名通常已經是乾淨的原始檔名，不需要那麼激進。"""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).strip().strip('.')
+    return (cleaned or "attachment")[:150]
+
+
+def save_attachments(attachments, unid):
+    """把下載到的附件另存一份到 ATTACHMENTS_DIR（跟 .eml 分開存），檔名前綴 unid 避免
+    同名衝突。回傳給 Qdrant payload 用的 [{"name": 原始檔名, "path": 存檔路徑}, ...]。"""
+    saved = []
+    for name, data in attachments:
+        fname = f"{unid}_{safe_attachment_filename(name)}"
+        path = os.path.join(ATTACHMENTS_DIR, fname)
+        with open(path, 'wb') as f:
+            f.write(data)
+        saved.append({"name": name, "path": path})
+    return saved
+
+
 def _sent_date_to_rfc2822(sent_date):
     """把 'YYYY-MM-DD HH:MM' 或 'YYYY-MM-DD' 轉成 RFC 2822 格式；失敗回傳空字串。"""
     if not sent_date:
@@ -986,6 +1014,17 @@ def main():
                        "date": thread_date_str, "sent_date": thread_sent_date,
                        "message_count": len(messages)}
 
+                # 下載每則訊息自己的附件、另存一份到 ATTACHMENTS_DIR（跟 .eml 分開存，
+                # 檔名前綴 unid 避免同名衝突）。要在 RAG 那步之前做，才能把存檔位置寫進
+                # Qdrant payload；同一份 bytes 留給下面 EML 打包用，不用重複下載。
+                att_links = get_attachment_links(page)
+                cookies   = {c['name']: c['value'] for c in page.context.cookies()}
+                for m in messages:
+                    own_links = [a for a in att_links if m["unid"] and m["unid"] in a['href']]
+                    attachments_data = download_attachments(own_links, cookies) if own_links else []
+                    m["_attachment_data"] = attachments_data
+                    m["attachments"] = save_attachments(attachments_data, m["unid"])
+
                 # ① RAG 索引 + ③ Hindsight retain（逐則訊息各自一筆）
                 rag_ok = hindsight_ok = 0
                 for m in messages:
@@ -1002,6 +1041,7 @@ def main():
                                 "date": m["date"], "sent_date": m["sent_date"],
                                 "thread_id": thread_id, "unid": m["unid"],
                                 "reply_to_unid": m.get("reply_to_unid"),
+                                "attachments": m.get("attachments", []),
                             })])
                         rag_ok += 1
                     except Exception as e:
@@ -1053,12 +1093,9 @@ def main():
                 # 帶 Message-ID/In-Reply-To（用 unid/reply_to_unid 組），Gmail 收到後會照
                 # 這些標準信頭自動重建討論串關聯。
                 try:
-                    att_links = get_attachment_links(page)
-                    cookies   = {c['name']: c['value'] for c in page.context.cookies()}
                     eml_paths, all_attachment_names = [], []
                     for i, m in enumerate(messages):
-                        own_links = [a for a in att_links if m["unid"] and m["unid"] in a['href']]
-                        attachments = download_attachments(own_links, cookies) if own_links else []
+                        attachments = m.get("_attachment_data", [])
                         eml_meta = {
                             "from": m["sender_email"] or m["sender_name"],
                             "to": m.get("to_raw", m["to"]), "cc": m.get("cc_raw", m["cc"]),
