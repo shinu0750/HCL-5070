@@ -72,13 +72,14 @@ class HindsightClient:
         })
         self.session_id = resp.headers.get("mcp-session-id")
 
-    def retain(self, content, document_id, timestamp, tags, metadata, context):
+    def retain(self, content, document_id, timestamp, metadata, context, bank_id="EID"):
         resp = requests.post(self.url, json={
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "retain", "arguments": {
                 "content": content, "document_id": document_id,
-                "timestamp": timestamp, "tags": tags,
+                "timestamp": timestamp,
                 "metadata": metadata, "context": context,
+                "bank_id": bank_id,
             }},
         }, headers={"mcp-session-id": self.session_id}, timeout=30)
         for line in resp.text.split("\n"):
@@ -119,8 +120,15 @@ HEADFUL     = "--headful" in _flags
 OUTPUT_DIR  = os.path.expanduser("~/verse-export")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 EXTERNAL_CONTACTS_XLSX = os.path.join(OUTPUT_DIR, "external_contacts.xlsx")
-# 附件另存一份（跟 .eml 分開），全部平放同一個資料夾，檔名前綴 unid 避免同名衝突
-ATTACHMENTS_DIR = os.path.join(OUTPUT_DIR, "attachments")
+# 分支 B（EML + 附件）實際存放位置：部門共用網路磁碟，不是本機 ~/verse-export
+# （本機那份只留給 xlsx 這些還沒決定搬過去的東西）
+EML_OUTPUT_DIR = os.environ.get(
+    "EML_OUTPUT_DIR",
+    r"\\10.11.1.40\工程管理暨智慧製造處\公用區-Hermes\eml",
+)
+os.makedirs(EML_OUTPUT_DIR, exist_ok=True)
+# 附件另存一份（跟 .eml 放同一個網路資料夾底下的子目錄），檔名前綴 unid 避免同名衝突
+ATTACHMENTS_DIR = os.path.join(EML_OUTPUT_DIR, "attachments")
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 # 每個帳號對應的 Google Chat space（沿用 hcl-notes-approval 的「使用者對照表」）
@@ -154,6 +162,20 @@ def ensure_collection():
 def make_id(subject, sender, date):
     """訊息級 UNID 抓不到時的備援 id（不理想，僅防止整批失敗）。"""
     return hashlib.md5(f"{sender}|{subject}|{date}".encode()).hexdigest()
+
+
+def already_indexed(unid):
+    """這個 UNID 是否已經寫進 Qdrant。已實測驗證 UNID 跨帳號一致（同一則訊息在
+    不同人信箱裡的 UNID 相同），所以之後合併同事信箱的信件時，同一則訊息重複
+    遇到直接跳過整段 RAG+Hindsight 寫入，不要再用 upsert 蓋掉——upsert 雖然本身
+    idempotent，但如果 Hindsight 那筆記錄事後被人工整理過，重新 retain 會把整理
+    過的內容蓋掉，跳過寫入才安全。查詢失敗（例如 collection 還不存在）視為
+    「還沒索引過」，讓後面正常走寫入流程。"""
+    try:
+        points = qdrant.retrieve(collection_name=COLLECTION, ids=[id_to_uuid(unid)])
+        return len(points) > 0
+    except Exception:
+        return False
 
 
 def make_row_signature(subject, sender, snippet):
@@ -1026,8 +1048,12 @@ def main():
                     m["attachments"] = save_attachments(attachments_data, m["unid"])
 
                 # ① RAG 索引 + ③ Hindsight retain（逐則訊息各自一筆）
-                rag_ok = hindsight_ok = 0
+                rag_ok = hindsight_ok = skipped_dup = 0
                 for m in messages:
+                    if already_indexed(m["unid"]):
+                        skipped_dup += 1
+                        print(f"  ↷ 已存在（unid={m['unid']}），跳過不寫入：{m['sender_name']}")
+                        continue
                     try:
                         text = f"{meta['subject']} {m['body']}"
                         embedding = get_embedding(text)
@@ -1048,13 +1074,11 @@ def main():
                         print(f"  ✗ RAG 失敗（{m['sender_name']}）：{e}")
 
                     try:
-                        tags = ["source:verse"]  # proj tag 先不分類，事後用同一個 document_id 補上（覆蓋 tags）
                         metadata = {
                             "subject":    meta["subject"],
                             "from_email": m["sender_email"],
                             "from_name":  m["sender_name"],
                             "to":         m["to"],
-                            "cc":         m["cc"],
                             "thread_id":  thread_id,
                             "unid":       m["unid"],
                             "sent_date":  m["sent_date"],
@@ -1072,7 +1096,6 @@ def main():
                             ),
                             document_id=m["unid"],
                             timestamp=m["sent_date"],
-                            tags=tags,
                             metadata=metadata,
                             context=f"HCL Verse 信件：主旨「{meta['subject']}」，寄件者 {m['sender_name']}",
                         )
@@ -1086,6 +1109,7 @@ def main():
 
                 rec["rag_ok"] = rag_ok
                 rec["hindsight_ok"] = hindsight_ok
+                rec["skipped_dup"] = skipped_dup
 
                 # ② EML 匯出：每則訊息各自一個 .eml（跟 RAG/Hindsight 那份訊息級+去重的
                 # 資料是分開的兩種用途）。內文只剝 Verse 的 UI chrome，不砍引用歷史——
@@ -1104,8 +1128,10 @@ def main():
                         }
                         eml_bytes = pack_eml(eml_meta, m["eml_body"], attachments,
                                              unid=m["unid"], reply_to_unid=m.get("reply_to_unid"))
-                        fname = f"{safe_filename(meta['subject'])}_{i:02d}_{safe_filename(m['sender_name'])}.eml"
-                        eml_path = os.path.join(OUTPUT_DIR, fname)
+                        # 檔名就用 unid：主旨/寄件者組出來的檔名不好查詢，
+                        # unid 本身就是唯一、可回頭比對 Qdrant/Hindsight 的 key
+                        fname = f"{m['unid']}.eml"
+                        eml_path = os.path.join(EML_OUTPUT_DIR, fname)
                         with open(eml_path, 'wb') as f:
                             f.write(eml_bytes)
                         eml_paths.append(eml_path)

@@ -10,7 +10,7 @@ Verse EML → Gmail 上傳（參數化版，供 hcl-verse-RAG pipeline 串接）
 
 預設：
     eml_folder = ~/verse-export
-    --label    = Notes_Import
+    --label    = Notes_Import_v2
     --done     = ~/Documents/eml to gamil/eml_done
     憑證/token = ~/Documents/eml to gamil/{credentials,token}.json
 """
@@ -39,10 +39,16 @@ BATCH_SIZE       = 50
 DELAY_SECONDS    = 1
 
 
+# EML 分支 B 實際存放位置：部門共用網路磁碟（跟 verse_archive_pipeline.py 的
+# EML_OUTPUT_DIR 用同一組預設值 + 同名環境變數，維持兩邊一致，不用互相 import）
+DEFAULT_EML_DIR = os.environ.get(
+    "EML_OUTPUT_DIR", r"\\10.11.1.40\工程管理暨智慧製造處\公用區-Hermes\eml")
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("eml_folder", nargs="?", default=os.path.expanduser("~/verse-export"))
-    ap.add_argument("--label", default="Notes_Import")
+    ap.add_argument("eml_folder", nargs="?", default=DEFAULT_EML_DIR)
+    ap.add_argument("--label", default="Notes_Import_v2")
     ap.add_argument("--done",  default=os.path.join(GMAIL_DIR, "eml_done"))
     ap.add_argument("--log",   default=os.path.join(GMAIL_DIR, "verse_upload_log.txt"))
     return ap.parse_args()

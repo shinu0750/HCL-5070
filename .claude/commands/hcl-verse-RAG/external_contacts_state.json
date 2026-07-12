@@ -1,0 +1,38 @@
+{
+  "no-reply@ecic.com.tw": {
+    "seen_names": [
+      "人事單位"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-10 12:31",
+    "last_seen": "2026-07-10 12:31",
+    "confirmed": false
+  },
+  "yutoku_yamashita@jsrgr.com": {
+    "seen_names": [
+      "Yamashita, Yuutoku"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-08 13:33",
+    "last_seen": "2026-07-08 13:33",
+    "confirmed": false
+  },
+  "helenaf@cicorp.com.tw": {
+    "seen_names": [
+      "helenaf"
+    ],
+    "count": 9,
+    "first_seen": "2026-06-18 15:59",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": false
+  },
+  "travisk@cicorp.com.tw": {
+    "seen_names": [
+      "travisk"
+    ],
+    "count": 1,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-06-13 11:45",
+    "confirmed": false
+  }
+}
