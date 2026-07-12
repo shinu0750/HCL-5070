@@ -171,6 +171,86 @@ def backfill_one(qdrant, hindsight, email, canonical_name):
     return updated
 
 
+def _replace_name_in_list(raw, old_names, new_name):
+    """to/cc 存的是 resolve_recipients() 組完的『、』分隔姓名字串，不是結構化的
+    email 清單，沒有 to_email/cc_email 可以查，只能整段名字完全比對 old_names
+    （這個聯絡人被確認前 Verse 顯示過的所有舊名字，來自 external_contacts_state.json
+    的 seen_names）才替換，避免誤傷剛好同名的其他字串片段。回傳 (新字串, 是否有變動)。"""
+    if not raw:
+        return raw, False
+    parts = raw.split("、")
+    changed = False
+    result = []
+    for part in parts:
+        if part.strip() in old_names:
+            result.append(new_name)
+            changed = True
+        else:
+            result.append(part)
+    return "、".join(result), changed
+
+
+def backfill_to_cc(qdrant, hindsight, email, canonical_name, seen_names):
+    """把 to/cc 欄位裡這個聯絡人被確認前的舊顯示名（seen_names）換成 canonical_name。
+
+    這個聯絡人可能只出現在別人信件的收件人清單裡（不是 from_email），Qdrant 沒有
+    to_email/cc_email 這種結構化欄位可以查，只能全表掃一次比對文字——已經靠
+    「處理完的列從 Excel 刪掉」擋住同一個聯絡人被重複處理，這裡不用再另外防重複。
+    Hindsight 的 content 本來就不含收件人資訊（只有主旨/寄件者/日期/內文），
+    metadata 也沒有 cc（3.7.0 移除），所以只要更新 metadata.to，不用重組 content。
+    回傳實際更新的筆數。"""
+    old_names = {n.strip() for n in (seen_names or []) if n and n.strip()}
+    if not old_names:
+        return 0
+
+    updated = 0
+    next_offset = None
+    while True:
+        points, next_offset = qdrant.scroll(
+            collection_name=COLLECTION, limit=200, with_payload=True, offset=next_offset,
+        )
+        for p in points:
+            new_to, to_changed = _replace_name_in_list(p.payload.get("to", ""), old_names, canonical_name)
+            new_cc, cc_changed = _replace_name_in_list(p.payload.get("cc", ""), old_names, canonical_name)
+            if not to_changed and not cc_changed:
+                continue
+
+            payload_update = {}
+            if to_changed:
+                payload_update["to"] = new_to
+            if cc_changed:
+                payload_update["cc"] = new_cc
+            qdrant.set_payload(collection_name=COLLECTION, payload=payload_update, points=[p.id])
+
+            unid = p.payload.get("unid")
+            if unid and to_changed:
+                doc = hindsight.get_document(unid)
+                if doc is None:
+                    print(f"  ✗ Hindsight 查無 unid={unid}（to 欄位），跳過（不是錯誤）")
+                else:
+                    old_tags = doc.get("tags") or ["mail"]
+                    old_metadata = dict(doc.get("document_metadata") or {})
+                    old_metadata["to"] = new_to
+                    result = hindsight.retain(
+                        content=doc.get("original_text", ""),
+                        document_id=unid,
+                        timestamp=old_metadata.get("sent_date", ""),
+                        metadata=old_metadata, tags=old_tags,
+                        context=f"HCL Verse 信件：主旨「{old_metadata.get('subject', '')}」，"
+                                f"寄件者 {old_metadata.get('from_name', '')}",
+                    )
+                    result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
+                    if "validation error" in result_text.lower():
+                        print(f"  ✗ Hindsight to 欄位更新被拒絕（unid={unid}）：{result_text[:200]}")
+
+            updated += 1
+
+        if next_offset is None:
+            break
+
+    return updated
+
+
 def main():
     xlsx_path = sys.argv[1] if len(sys.argv) > 1 else XLSX_PATH
     if not os.path.exists(xlsx_path):
@@ -190,13 +270,18 @@ def main():
     processed_row_indices = []
     for row_idx, email, canonical_name in rows:
         print(f"處理 {email} -> {canonical_name}")
+        seen_names = state.get(email, {}).get("seen_names", [])
         upsert_email_mapping(email, canonical_name)
         n = backfill_one(qdrant, hindsight, email, canonical_name)
+        n_to_cc = backfill_to_cc(qdrant, hindsight, email, canonical_name, seen_names)
         if email in state:
             state[email]["confirmed"] = True
-        summary.append({"email": email, "canonical_name": canonical_name, "unids_updated": n})
+        summary.append({
+            "email": email, "canonical_name": canonical_name,
+            "unids_updated": n, "to_cc_updated": n_to_cc,
+        })
         processed_row_indices.append(row_idx)
-        print(f"  ✓ 回填 {n} 筆")
+        print(f"  ✓ 回填 {n} 筆（from_email）+ {n_to_cc} 筆（to/cc）")
 
     save_state(state)
 
@@ -209,7 +294,8 @@ def main():
 
     print("\n=== 完成 ===")
     for s in summary:
-        print(f"  {s['email']} -> {s['canonical_name']}：{s['unids_updated']} 筆")
+        print(f"  {s['email']} -> {s['canonical_name']}："
+              f"{s['unids_updated']} 筆（from_email）+ {s['to_cc_updated']} 筆（to/cc）")
 
 
 if __name__ == "__main__":

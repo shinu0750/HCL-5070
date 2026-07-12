@@ -4,8 +4,9 @@ description: >
   外部聯絡人名單確認後的回填 pipeline。當用戶說「hindsight聯絡人更新」時使用此
   skill。讀回 hcl-verse-RAG 產生的 external_contacts.xlsx（人工填好 canonical_name
   的列），回填 email_mapping（PostgreSQL）、Qdrant（verse_emails collection 的
-  from_name）、Hindsight（EID bank，保留舊 tags/metadata 重新 retain）。
-version: 1.1.0
+  from_name，以及 to/cc 欄位裡出現過的舊顯示名）、Hindsight（EID bank，保留舊
+  tags/metadata 重新 retain）。
+version: 1.2.0
 ---
 
 # 外部聯絡人回填 Pipeline
@@ -56,15 +57,33 @@ python .claude/commands/hcl-verse-contacts-update/update_external_contacts.py
      `content`（主旨/寄件者/日期/內文），帶著原本的 `tags` 一起重新 `retain()`
    - Hindsight 查無這個 UNID 一樣是正常情況（代表當初 retain 那步可能失敗過），
      跳過即可
-4. 全部處理完，把 `external_contacts_state.json` 裡對應的 email 標成
+4. **`backfill_to_cc()`：補齊 to/cc 欄位裡的舊顯示名**——這個聯絡人可能只出現
+   在別人信件的收件人清單裡（不是 `from_email`），Qdrant 沒有 `to_email`/
+   `cc_email` 這種結構化欄位可以查，只能全表 `scroll()`（不帶 filter，用
+   `next_page_offset` 分頁掃完整個 collection）比對文字：
+   - `to`/`cc` 存的是 `resolve_recipients()` 組完的『、』分隔姓名字串，用
+     `external_contacts_state.json` 裡這個聯絡人的 `seen_names`（被確認前
+     Verse 顯示過的所有舊名字）逐段完全比對（不是子字串比對，避免誤傷剛好
+     名字部分重疊的其他字串），比對到就換成 `canonical_name`
+   - Qdrant：`set_payload()` 更新 `to`/`cc`
+   - Hindsight：**同樣先 `get_document()` 讀回 `tags`/`document_metadata`**，
+     只更新 `metadata.to`（`metadata` 本來就沒有 `cc`，3.7.0 移除）——`content`
+     本來就不含收件人資訊（只有主旨/寄件者/日期/內文），不用重組，直接把
+     `get_document()` 讀回的 `original_text` 原樣帶回去重新 `retain()`
+   - 已用真實案例驗證：unid `631D18D31073918548258E21002F841F`（穆彥池寄給
+     helenaf 那則），`to` 從 Verse 顯示的英文帳號名「helenaf」正確換成確認過的
+     「于宗仁」，同一次全表掃描共找到 6 筆相關記錄，`tags`/`thread_id`/
+     `from_name`/`from_email` 等其他欄位完整保留
+5. 全部處理完，把 `external_contacts_state.json` 裡對應的 email 標成
    `confirmed=true`（reuse hcl-verse-RAG 的 `external_contacts_tracker.py`，不
    重複實作 state 檔案讀寫）——下次 hcl-verse-RAG 產生 Excel 時這幾位就不會再
    列出來
-5. **把處理完的列直接從 Excel 刪掉**（`ws.delete_rows()`，由後往前刪避免
+6. **把處理完的列直接從 Excel 刪掉**（`ws.delete_rows()`，由後往前刪避免
    index 跟著位移，刪完 `wb.save()` 存回原檔）——`email_mapping` 已經 upsert
    進去了，這列留著沒有意義；更重要的是避免同一份 Excel 沒重新產生就重跑時
    被整批重複處理一次（upsert 沒差，但 Qdrant 全表相關查詢、Hindsight 重新
-   `retain()` 都是白做工）
+   `retain()` 都是白做工——尤其是步驟 4 的全表掃描，一個聯絡人只會在被確認的
+   這一次做，不會因為 Excel 沒清乾淨而重複掃）
 
 ## 技術細節
 
