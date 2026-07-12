@@ -23,7 +23,6 @@ import psycopg2
 import requests
 from openpyxl import load_workbook
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 _env_path = os.path.expanduser("~/.hermes/.env")
 if os.path.exists(_env_path):
@@ -119,58 +118,6 @@ def read_confirmed_rows(xlsx_path):
     return wb, ws, rows
 
 
-def backfill_one(qdrant, hindsight, email, canonical_name):
-    """回填單一聯絡人在 Qdrant/Hindsight 裡的所有記錄，回傳實際更新的筆數。"""
-    points, _ = qdrant.scroll(
-        collection_name=COLLECTION,
-        scroll_filter=Filter(must=[FieldCondition(key="from_email", match=MatchValue(value=email))]),
-        limit=1000, with_payload=True,
-    )
-    if not points:
-        print(f"  ↷ Qdrant 查無 {email} 相關資料，跳過（可能當初 RAG 那步失敗過，不是錯誤）")
-        return 0
-
-    updated = 0
-    for p in points:
-        unid = p.payload.get("unid")
-        if not unid:
-            continue
-
-        qdrant.set_payload(collection_name=COLLECTION, payload={"from_name": canonical_name}, points=[p.id])
-
-        doc = hindsight.get_document(unid)
-        if doc is None:
-            print(f"  ✗ Hindsight 查無 unid={unid}，跳過（可能當初 retain 那步失敗過，不是錯誤）")
-            continue
-
-        old_tags = doc.get("tags") or ["mail"]
-        old_metadata = dict(doc.get("document_metadata") or {})
-        old_metadata["from_name"] = canonical_name
-        old_metadata["from_email"] = email
-
-        subject = old_metadata.get("subject", p.payload.get("subject", ""))
-        sent_date = old_metadata.get("sent_date", p.payload.get("sent_date", ""))
-        body = p.payload.get("body", "")
-
-        content = (
-            f"主旨：{subject}\n"
-            f"寄件者：{canonical_name} <{email}>\n"
-            f"日期：{sent_date}\n\n{body}"
-        )
-        result = hindsight.retain(
-            content=content, document_id=unid, timestamp=sent_date,
-            metadata=old_metadata, tags=old_tags,
-            context=f"HCL Verse 信件：主旨「{subject}」，寄件者 {canonical_name}",
-        )
-        result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
-        if "validation error" in result_text.lower():
-            print(f"  ✗ Hindsight retain 被拒絕（unid={unid}）：{result_text[:200]}")
-            continue
-        updated += 1
-
-    return updated
-
-
 def _replace_name_in_list(raw, old_names, new_name):
     """to/cc 存的是 resolve_recipients() 組完的『、』分隔姓名字串，不是結構化的
     email 清單，沒有 to_email/cc_email 可以查，只能整段名字完全比對 old_names
@@ -190,18 +137,22 @@ def _replace_name_in_list(raw, old_names, new_name):
     return "、".join(result), changed
 
 
-def backfill_to_cc(qdrant, hindsight, email, canonical_name, seen_names):
-    """把 to/cc 欄位裡這個聯絡人被確認前的舊顯示名（seen_names）換成 canonical_name。
+def backfill_contact(qdrant, hindsight, email, canonical_name, seen_names):
+    """單一聯絡人的完整回填，合併原本分開的兩段邏輯，只全表掃一次：
 
-    這個聯絡人可能只出現在別人信件的收件人清單裡（不是 from_email），Qdrant 沒有
-    to_email/cc_email 這種結構化欄位可以查，只能全表掃一次比對文字——已經靠
-    「處理完的列從 Excel 刪掉」擋住同一個聯絡人被重複處理，這裡不用再另外防重複。
-    Hindsight 的 content 本來就不含收件人資訊（只有主旨/寄件者/日期/內文），
-    metadata 也沒有 cc（3.7.0 移除），所以只要更新 metadata.to，不用重組 content。
+    - `from_email == email` 命中 -> 更新這筆的 `from_name`
+    - `to`/`cc` 裡有這個聯絡人被確認前的舊顯示名（`seen_names`）-> 換成
+      `canonical_name`（Qdrant 沒有 `to_email`/`cc_email` 可查，只能全表掃描
+      文字比對，本來就要掃過整個 collection 一輪）
+
+    原本這兩段分別用「精準 `Filter(from_email)` 查詢」+「全表掃描」各自獨立
+    掃一輪：後者反正要掃全表，前者的精準查詢等於白做；更重要的是如果同一個
+    UNID 剛好同時命中兩邊條件，分開呼叫會各自獨立對同一筆記錄呼叫一次 Hindsight
+    `get_document()`+`retain()`，兩次非同步寫入互相競爭，晚到的那次會覆蓋掉
+    先到的那次剛更新的欄位。合併成一次全表掃描、每筆記錄只組一次
+    payload_update/metadata_update 一起送出，兩個問題一起解決。
     回傳實際更新的筆數。"""
     old_names = {n.strip() for n in (seen_names or []) if n and n.strip()}
-    if not old_names:
-        return 0
 
     updated = 0
     next_offset = None
@@ -210,30 +161,54 @@ def backfill_to_cc(qdrant, hindsight, email, canonical_name, seen_names):
             collection_name=COLLECTION, limit=200, with_payload=True, offset=next_offset,
         )
         for p in points:
-            new_to, to_changed = _replace_name_in_list(p.payload.get("to", ""), old_names, canonical_name)
-            new_cc, cc_changed = _replace_name_in_list(p.payload.get("cc", ""), old_names, canonical_name)
-            if not to_changed and not cc_changed:
+            payload_update = {}
+            metadata_update = {}
+
+            if p.payload.get("from_email") == email:
+                payload_update["from_name"] = canonical_name
+                metadata_update["from_name"] = canonical_name
+                metadata_update["from_email"] = email
+
+            if old_names:
+                new_to, to_changed = _replace_name_in_list(p.payload.get("to", ""), old_names, canonical_name)
+                new_cc, cc_changed = _replace_name_in_list(p.payload.get("cc", ""), old_names, canonical_name)
+                if to_changed:
+                    payload_update["to"] = new_to
+                    metadata_update["to"] = new_to
+                if cc_changed:
+                    payload_update["cc"] = new_cc  # Hindsight metadata 沒有 cc（3.7.0 移除），只更新 Qdrant
+
+            if not payload_update:
                 continue
 
-            payload_update = {}
-            if to_changed:
-                payload_update["to"] = new_to
-            if cc_changed:
-                payload_update["cc"] = new_cc
             qdrant.set_payload(collection_name=COLLECTION, payload=payload_update, points=[p.id])
 
             unid = p.payload.get("unid")
-            if unid and to_changed:
+            if unid and metadata_update:
                 doc = hindsight.get_document(unid)
                 if doc is None:
-                    print(f"  ✗ Hindsight 查無 unid={unid}（to 欄位），跳過（不是錯誤）")
+                    print(f"  ✗ Hindsight 查無 unid={unid}，跳過（可能當初 retain 那步失敗過，不是錯誤）")
                 else:
                     old_tags = doc.get("tags") or ["mail"]
                     old_metadata = dict(doc.get("document_metadata") or {})
-                    old_metadata["to"] = new_to
+                    old_metadata.update(metadata_update)
+
+                    if "from_name" in metadata_update:
+                        # 寄件者顯示在 content 裡，姓名變了要重組；收件人本來就不在
+                        # content 裡，只改 to 的話沿用 get_document() 讀回的原文即可
+                        subject = old_metadata.get("subject", p.payload.get("subject", ""))
+                        sent_date = old_metadata.get("sent_date", p.payload.get("sent_date", ""))
+                        body = p.payload.get("body", "")
+                        content = (
+                            f"主旨：{subject}\n"
+                            f"寄件者：{canonical_name} <{email}>\n"
+                            f"日期：{sent_date}\n\n{body}"
+                        )
+                    else:
+                        content = doc.get("original_text", "")
+
                     result = hindsight.retain(
-                        content=doc.get("original_text", ""),
-                        document_id=unid,
+                        content=content, document_id=unid,
                         timestamp=old_metadata.get("sent_date", ""),
                         metadata=old_metadata, tags=old_tags,
                         context=f"HCL Verse 信件：主旨「{old_metadata.get('subject', '')}」，"
@@ -241,7 +216,7 @@ def backfill_to_cc(qdrant, hindsight, email, canonical_name, seen_names):
                     )
                     result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
                     if "validation error" in result_text.lower():
-                        print(f"  ✗ Hindsight to 欄位更新被拒絕（unid={unid}）：{result_text[:200]}")
+                        print(f"  ✗ Hindsight retain 被拒絕（unid={unid}）：{result_text[:200]}")
 
             updated += 1
 
@@ -272,16 +247,12 @@ def main():
         print(f"處理 {email} -> {canonical_name}")
         seen_names = state.get(email, {}).get("seen_names", [])
         upsert_email_mapping(email, canonical_name)
-        n = backfill_one(qdrant, hindsight, email, canonical_name)
-        n_to_cc = backfill_to_cc(qdrant, hindsight, email, canonical_name, seen_names)
+        n = backfill_contact(qdrant, hindsight, email, canonical_name, seen_names)
         if email in state:
             state[email]["confirmed"] = True
-        summary.append({
-            "email": email, "canonical_name": canonical_name,
-            "unids_updated": n, "to_cc_updated": n_to_cc,
-        })
+        summary.append({"email": email, "canonical_name": canonical_name, "unids_updated": n})
         processed_row_indices.append(row_idx)
-        print(f"  ✓ 回填 {n} 筆（from_email）+ {n_to_cc} 筆（to/cc）")
+        print(f"  ✓ 回填 {n} 筆")
 
     save_state(state)
 
@@ -294,8 +265,7 @@ def main():
 
     print("\n=== 完成 ===")
     for s in summary:
-        print(f"  {s['email']} -> {s['canonical_name']}："
-              f"{s['unids_updated']} 筆（from_email）+ {s['to_cc_updated']} 筆（to/cc）")
+        print(f"  {s['email']} -> {s['canonical_name']}：{s['unids_updated']} 筆")
 
 
 if __name__ == "__main__":
