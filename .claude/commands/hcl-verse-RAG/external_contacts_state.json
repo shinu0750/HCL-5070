@@ -34,5 +34,23 @@
     "first_seen": "2026-06-13 11:45",
     "last_seen": "2026-06-13 11:45",
     "confirmed": true
+  },
+  "dmp@ecic.com.tw": {
+    "seen_names": [
+      "DMP"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-09 05:16",
+    "last_seen": "2026-07-09 05:16",
+    "confirmed": false
+  },
+  "noahtu@micb2b.com": {
+    "seen_names": [
+      "Noah Tu 杜欣峯"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-08 23:18",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
   }
 }

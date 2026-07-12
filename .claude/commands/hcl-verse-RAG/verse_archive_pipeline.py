@@ -14,11 +14,13 @@ HCL Verse 歸檔 pipeline
   上傳 Gmail 用
 
 用法：
-    python3 verse_archive_pipeline.py [max_results] [--no-move] [--headful]
+    python3 verse_archive_pipeline.py [max_results] [--no-move] [--headful] [--by-messages]
 
-    max_results   處理上限，預設 50
-    --no-move     只做 EML+RAG，不移動信件（測試用，不會動到信箱）
-    --headful     顯示瀏覽器視窗（除錯用；預設 headless）
+    max_results     處理上限，預設 50
+    --no-move       只做 EML+RAG，不移動信件（測試用，不會動到信箱）
+    --headful       顯示瀏覽器視窗（除錯用；預設 headless）
+    --by-messages   max_results 改成「訊息數」上限（累計到達即停），而不是預設的
+                    「信件/列數」上限——討論串會拆成多則訊息，一封信可能不只一則
 """
 import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse, subprocess
 from datetime import datetime, timedelta
@@ -117,6 +119,9 @@ _flags    = {a for a in sys.argv[1:] if a.startswith("--")}
 MAX_RESULTS = int(_args[0]) if _args else 50
 NO_MOVE     = "--no-move" in _flags
 HEADFUL     = "--headful" in _flags
+# --by-messages：MAX_RESULTS 改成「訊息數」上限（累計到達即停），而不是預設的
+# 「信件/列數」上限——討論串會拆成多則訊息，用信件數當上限沒辦法精準控制訊息總數
+BY_MESSAGES = "--by-messages" in _flags
 OUTPUT_DIR  = os.path.expanduser("~/verse-export")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 EXTERNAL_CONTACTS_XLSX = os.path.join(OUTPUT_DIR, "external_contacts.xlsx")
@@ -351,7 +356,8 @@ def resolve_canonical_names_via_api(page, canonical_names, nonce):
     return parse_validation_response(js_result.get("text", ""))
 
 
-def resolve_recipients(raw, name_canonicals=None, name_directory=None):
+def resolve_recipients(raw, name_canonicals=None, name_directory=None,
+                        contacts_state=None, date_str=None):
     """把 to/cc 字串裡每個 'Name <email>' 或純 email 都換成通訊錄查到的姓名，
     只給 RAG/Hindsight 用（可讀性優先，不需要真的 email）。EML 那邊要保留原始
     收件人資訊（含 email），不要走這個函式——兩種輸出用途不同，見 pipeline 文件說明。
@@ -361,7 +367,13 @@ def resolve_recipients(raw, name_canonicals=None, name_directory=None):
     name_directory：整個 pipeline run 累積的「canonical name -> (中文名, email)」
     對照表（來自 parse_validation_response() 持續攔截 Verse 自動發的驗證回應）。
     兩者都沒有（例如舊呼叫方式，或這則訊息沒有任何無 email 收件人）時行為跟改之前
-    完全一樣。"""
+    完全一樣。
+
+    contacts_state/date_str：帶了才會追蹤「有 email 但 email_mapping 查不到」的
+    收件人（呼叫 track_unknown_contact()，跟 resolve_sender() 現有機制一致，見
+    changelog 3.13.0）。純姓名、沒有 email 的收件人（例如外部廠商自己的 Domino
+    canonical name，格式不是我們能解析的 email）無法用這個機制追蹤——沒有 email
+    可以當 key，也沒有實際 email 能寫回 email_mapping，留著原樣顯示，仍是已知缺口。"""
     if not raw:
         return raw
     name_canonicals = name_canonicals or {}
@@ -372,9 +384,13 @@ def resolve_recipients(raw, name_canonicals=None, name_directory=None):
         if m:
             display, addr = m.group(1).strip(), m.group(2).strip()
             name = email_to_name(addr)
+            if name == addr and contacts_state is not None:
+                track_unknown_contact(addr, display, date_str, contacts_state)
             names.append(name if name != addr else (display or addr))
         elif '@' in part:
             name = email_to_name(part)
+            if name == part and contacts_state is not None:
+                track_unknown_contact(part, "", date_str, contacts_state)
             names.append(name if name != part else part)
         else:
             # 純姓名、沒有 email——查這則訊息抓到的 canonical name，
@@ -1148,11 +1164,13 @@ def main():
             open_folder(page, SOURCE_FOLDER)
 
             count = page.locator('.seq-msg-row').count()
-            print(f"「{SOURCE_FOLDER}」目前可見 {count} 封，開始處理（上限 {MAX_RESULTS}"
+            limit_unit = "則訊息" if BY_MESSAGES else "封"
+            print(f"「{SOURCE_FOLDER}」目前可見 {count} 封，開始處理（上限 {MAX_RESULTS}{limit_unit}"
                   f"{'，--no-move 不移動' if NO_MOVE else ''}）...\n")
 
             processed = 0
-            while processed < MAX_RESULTS:
+            msg_running_total = 0
+            while (msg_running_total if BY_MESSAGES else processed) < MAX_RESULTS:
                 rows = page.locator('.seq-msg-row')
                 if rows.count() == 0:
                     print("資料夾已清空，結束。")
@@ -1234,9 +1252,11 @@ def main():
                         # name_canonicals/name_directory 讓沒有 <email> 的收件人（分廠/子公司
                         # 英文 canonical name 註冊的帳號）也能轉中文，見 resolve_recipients() 說明
                         "to": resolve_recipients(substitute_me(blk.get("to", "")),
-                                                  blk.get("name_canonicals"), name_directory),
+                                                  blk.get("name_canonicals"), name_directory,
+                                                  contacts_state, sent_date_for_block),
                         "cc": resolve_recipients(substitute_me(blk.get("cc", "")),
-                                                  blk.get("name_canonicals"), name_directory),
+                                                  blk.get("name_canonicals"), name_directory,
+                                                  contacts_state, sent_date_for_block),
                         # 給 EML 用，保留 email；quote_recipient_header() 把「Lastname,
                         # Firstname」這種名字裡帶逗號的顯示名加上雙引號，避免 Gmail
                         # 解析 To:/Cc: 信頭時把逗號誤判成收件人分隔符、拆成兩個人
@@ -1267,9 +1287,11 @@ def main():
                         "sender_email": thread_sender_email,
                         "sender_name": thread_sender_name,
                         "to": resolve_recipients(thread_header.get("to", ""),
-                                                  thread_header.get("name_canonicals"), name_directory),
+                                                  thread_header.get("name_canonicals"), name_directory,
+                                                  contacts_state, thread_sent_date),
                         "cc": resolve_recipients(thread_header.get("cc", ""),
-                                                  thread_header.get("name_canonicals"), name_directory),
+                                                  thread_header.get("name_canonicals"), name_directory,
+                                                  contacts_state, thread_sent_date),
                         "to_raw": quote_recipient_header(thread_header.get("to", "")),
                         "cc_raw": quote_recipient_header(thread_header.get("cc", "")),
                         "date": thread_date_str,
@@ -1402,6 +1424,7 @@ def main():
                           f"Hindsight {hindsight_ok}/{len(messages)}, 附件{len(rec.get('attachments', []))}, 不移動)")
                     results.append(rec)
                     processed += 1
+                    msg_running_total += len(messages)
                     # --no-move 模式無法移出，否則會重複處理同一封 → 只處理第一封後停
                     print("  （--no-move 模式：只處理目前頂部第一封以驗證流程，結束。）")
                     break
@@ -1420,6 +1443,7 @@ def main():
 
                 results.append(rec)
                 processed += 1
+                msg_running_total += len(messages)
 
         finally:
             browser.close()
