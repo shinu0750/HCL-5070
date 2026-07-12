@@ -244,6 +244,34 @@ def substitute_me(raw):
     return re.sub(r'(?<![\w@.])me(?![\w@.])', MY_EMAIL or 'me', raw)
 
 
+_ASCII_SINGLE_WORD = re.compile(r"^[A-Za-z][A-Za-z.\-']*$")
+
+
+def _split_recipient_entries(raw):
+    """把 to/cc 原始字串安全切成一個個收件人條目。不能單純用逗號切——西式姓名的
+    'Lastname, Firstname <email>' 格式（例如 Verse 常見的「Hsieh, Tata」）本身就含
+    逗號，會被誤切成兩筆（「Hsieh」變成一個沒有 email 的假收件人）。
+
+    做法：初步用逗號切開後，如果某一段本身沒有 email/括號、且是「不含空白的純英文
+    單詞」（像獨立姓氏 Hsieh、Yamashita 那樣），同時緊接著的下一段有 `<email>`，
+    視為同一個人被誤切，合併回去。只處理這種「單一英文單詞」的情況——中文姓名跟
+    多字英文全名（例如 'Yao-Chung Liu' 這種本身就有空白的完整姓名）不會被合併，
+    降低把兩個不同人誤判成同一人的風險（這是啟發式判斷，不保證 100% 正確）。"""
+    raw_parts = [p.strip() for p in raw.split(',')]
+    merged, i = [], 0
+    while i < len(raw_parts):
+        part = raw_parts[i]
+        if (part and '<' not in part and '@' not in part
+                and _ASCII_SINGLE_WORD.match(part)
+                and i + 1 < len(raw_parts) and '<' in raw_parts[i + 1]):
+            merged.append(f"{part}, {raw_parts[i + 1]}")
+            i += 2
+        else:
+            merged.append(part)
+            i += 1
+    return [p for p in merged if p]
+
+
 def resolve_recipients(raw):
     """把 to/cc 字串裡每個 'Name <email>' 或純 email 都換成通訊錄查到的姓名，
     只給 RAG/Hindsight 用（可讀性優先，不需要真的 email）。EML 那邊要保留原始
@@ -251,9 +279,7 @@ def resolve_recipients(raw):
     if not raw:
         return raw
     names = []
-    for part in (p.strip() for p in raw.split(',')):
-        if not part:
-            continue
+    for part in _split_recipient_entries(raw):
         m = re.match(r'^"?([^"<>]*)"?\s*<([^<>]+)>$', part)
         if m:
             display, addr = m.group(1).strip(), m.group(2).strip()
@@ -265,6 +291,28 @@ def resolve_recipients(raw):
         else:
             names.append(part)  # 已經是純姓名（Notes 內部位址常見），原樣保留
     return "、".join(names)
+
+
+def quote_recipient_header(raw):
+    """把 to/cc 字串重組成合法的 RFC 5322 位址清單，給 EML 信頭用：任何顯示名稱本身
+    含逗號（例如「Hsieh, Tata」）的收件人，用雙引號把名字包起來（`"Hsieh, Tata" <email>`）。
+    不這樣做的話，Gmail（或任何標準郵件軟體）解析 To:/Cc: 信頭時，逗號本來就是
+    「下一個收件人開始」的意思，會把這種名字誤判成兩個收件人——一個是沒有 email
+    的「Hsieh」，一個才是真正的「Tata <email>」。"""
+    if not raw:
+        return raw
+    out = []
+    for part in _split_recipient_entries(raw):
+        m = re.match(r'^"?([^"<>]*?)"?\s*<([^<>]+)>$', part)
+        if m:
+            display, addr = m.group(1).strip(), m.group(2).strip()
+            if display and ',' in display and not (display.startswith('"') and display.endswith('"')):
+                out.append(f'"{display}" <{addr}>')
+            else:
+                out.append(part)
+        else:
+            out.append(part)
+    return ", ".join(out)
 
 
 # ── 日期正規化 ───────────────────────────────────────────────────────────────
@@ -1001,8 +1049,11 @@ def main():
                         # thread_header/thread_raw 的原始值（含 email、不砍引用），兩邊互不影響
                         "to": resolve_recipients(substitute_me(blk.get("to", ""))),
                         "cc": resolve_recipients(substitute_me(blk.get("cc", ""))),
-                        "to_raw": substitute_me(blk.get("to", "")),  # 給 EML 用，保留 email
-                        "cc_raw": substitute_me(blk.get("cc", "")),
+                        # 給 EML 用，保留 email；quote_recipient_header() 把「Lastname,
+                        # Firstname」這種名字裡帶逗號的顯示名加上雙引號，避免 Gmail
+                        # 解析 To:/Cc: 信頭時把逗號誤判成收件人分隔符、拆成兩個人
+                        "to_raw": quote_recipient_header(substitute_me(blk.get("to", ""))),
+                        "cc_raw": quote_recipient_header(substitute_me(blk.get("cc", ""))),
                         "date": blk.get("date", ""),
                         "sent_date": normalize_sent_date(blk.get("date", "")),
                         "body": body_clean,
@@ -1023,8 +1074,8 @@ def main():
                         "sender_name": thread_sender_name,
                         "to": resolve_recipients(thread_header.get("to", "")),
                         "cc": resolve_recipients(thread_header.get("cc", "")),
-                        "to_raw": thread_header.get("to", ""),
-                        "cc_raw": thread_header.get("cc", ""),
+                        "to_raw": quote_recipient_header(thread_header.get("to", "")),
+                        "cc_raw": quote_recipient_header(thread_header.get("cc", "")),
                         "date": thread_date_str,
                         "sent_date": thread_sent_date,
                         "body": clean_body(thread_raw, meta["subject"]),
