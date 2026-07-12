@@ -72,14 +72,14 @@ class HindsightClient:
         })
         self.session_id = resp.headers.get("mcp-session-id")
 
-    def retain(self, content, document_id, timestamp, metadata, context, bank_id="EID"):
+    def retain(self, content, document_id, timestamp, metadata, context, bank_id="EID", tags=None):
         resp = requests.post(self.url, json={
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "retain", "arguments": {
                 "content": content, "document_id": document_id,
                 "timestamp": timestamp,
                 "metadata": metadata, "context": context,
-                "bank_id": bank_id,
+                "bank_id": bank_id, "tags": tags,
             }},
         }, headers={"mcp-session-id": self.session_id}, timeout=30)
         for line in resp.text.split("\n"):
@@ -1148,6 +1148,11 @@ def main():
                             document_id=m["unid"],
                             timestamp=m["sent_date"],
                             metadata=metadata,
+                            # 重新加回 tags——這次不是為了 proj 分類（那個還是暫緩），
+                            # 是為了讓 reflect()/recall() 能用 tags=["mail"] 過濾，
+                            # 避免跟同一個 EID bank 裡其他 skill 寫入的資料（例如
+                            # hcl-notes-approval 的簽核記錄）混在一起污染查詢結果
+                            tags=["mail"],
                             context=f"HCL Verse 信件：主旨「{meta['subject']}」，寄件者 {m['sender_name']}",
                         )
                         result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
