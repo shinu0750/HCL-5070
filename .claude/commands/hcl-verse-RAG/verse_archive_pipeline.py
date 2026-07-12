@@ -272,12 +272,100 @@ def _split_recipient_entries(raw):
     return [p for p in merged if p]
 
 
-def resolve_recipients(raw):
+def parse_validation_response(text):
+    """解析 iNotes 姓名驗證 API（POST .../iNotes/Proxy/?EditDocument&Form=s_ValidationJson）
+    的回應，回傳 {canonical_name: (中文名, email)}。
+
+    這支 API 是 Verse 自己在各種時機（不只是我們正在處理的這封信——folder 列表
+    渲染寄件人、其他信件的收件人預先驗證等等都會觸發）用來把 Domino canonical
+    name（像 `Chun-Hua Huang/elfc1/everlight` 這種分廠/子公司用英文命名慣例
+    註冊的帳號）解析成中文名+email。**注意**：Verse 自動觸發的這些請求內容跟我們
+    正在處理的那封信的收件人不一定相關（實測發現一次自動請求裡的 70 幾個名字
+    跟目標信件完全對不上，應該是 folder 列表其他信件的名字）——不能假設「打開
+    這封信就會自動解析出這封信的收件人」。真正可靠的做法是用
+    resolve_canonical_names_via_api() 主動幫這封信裡沒解析到的名字補送一次批次
+    請求，這支函式只負責被動 parse 任何一次回應（不管是 Verse 自己觸發的還是
+    我們自己送的），找到就收，找不到（真的是外部廠商查無此人）的名字直接跳過，
+    留給呼叫端原樣保留顯示名。"""
+    result = {}
+    try:
+        data = json.loads(text)
+    except Exception:
+        return result
+    top_entries = (data.get("viewentry") or {}).get("entrydata") or []
+    for section in top_entries:  # "local" / "server" 兩個區段都可能有解析結果
+        section_entries = ((section.get("viewentries") or {}).get("viewentry")) or []
+        for item in section_entries:
+            fields = {f.get("@name"): f for f in (item.get("entrydata") or [])}
+            original = ((fields.get("originalName") or {}).get("text") or {}).get("0", "")
+            candidates = ((fields.get("candidate") or {}).get("viewentries") or {}).get("viewentry") or []
+            if not original or not candidates:
+                continue
+            cand_fields = {f.get("@name"): f for f in (candidates[0].get("entrydata") or [])}
+            alt_full = ((cand_fields.get("altFullName") or {}).get("text") or {}).get("0", "")
+            email = ((cand_fields.get("internetAddress") or {}).get("text") or {}).get("0", "")
+            m = re.match(r'CN=([^/]+)', alt_full)
+            chinese_name = m.group(1).strip() if m else ""
+            # server 區段通常比 local 完整，有拿到新資料就覆蓋掉舊的（含 local 那份空值）
+            if chinese_name or email or original not in result:
+                result[original] = (chinese_name, email)
+    return result
+
+
+def resolve_canonical_names_via_api(page, canonical_names, nonce):
+    """在還開著、已登入的頁面 context 內，主動幫一批 Domino canonical name
+    （沒有 `@` 的那種，例如 `Chun-Hua Huang/elfc1/everlight`）補送一次
+    s_ValidationJson 批次驗證請求，回傳 parse_validation_response() 的結果。
+
+    一次可以丟多個名字（分號分隔），不用一個一個點名片卡觸發。這支 API 需要
+    `X-IBM-INotes-Nonce` header 才會通過（純用登入 cookies 呼叫會被 401 擋掉，
+    也試過從 meta tag/window 全域變數找這個 nonce，兩者都沒有——只能從真的發生
+    過的 s_ValidationJson 請求（不管是 Verse 自己觸發的還是我們自己送的）的
+    request header 被動攔截取得，呼叫端要自己維護抓到的 nonce 值傳進來。
+    canonical_names 為空、或還沒抓到任何 nonce 時直接回傳空字典，不發請求。"""
+    if not canonical_names or not nonce:
+        return {}
+    names_str = ";".join(canonical_names)
+    js_result = page.evaluate("""async ([namesStr, nonceVal]) => {
+        const body = new URLSearchParams();
+        body.set('%%PostCharset', 'UTF-8');
+        body.set('VAL_NameEntries', namesStr);
+        body.set('VAL_DisablePartial', '1');
+        body.set('VAL_Commands', '$cache');
+        try {
+            const resp = await fetch(
+                'https://mail1.ecic.com.tw/mail/6971.nsf/iNotes/Proxy/?EditDocument&Form=s_ValidationJson&xhr=1&sq=1',
+                { method: 'POST', credentials: 'include',
+                  headers: { 'Content-Type': 'application/x-www-form-urlencoded',
+                             'X-Requested-With': 'XMLHttpRequest',
+                             'X-IBM-INotes-Nonce': nonceVal },
+                  body: body.toString() }
+            );
+            return { status: resp.status, text: await resp.text() };
+        } catch (e) {
+            return { status: 0, text: '', error: String(e) };
+        }
+    }""", [names_str, nonce])
+    if js_result.get("status") != 200:
+        return {}
+    return parse_validation_response(js_result.get("text", ""))
+
+
+def resolve_recipients(raw, name_canonicals=None, name_directory=None):
     """把 to/cc 字串裡每個 'Name <email>' 或純 email 都換成通訊錄查到的姓名，
     只給 RAG/Hindsight 用（可讀性優先，不需要真的 email）。EML 那邊要保留原始
-    收件人資訊（含 email），不要走這個函式——兩種輸出用途不同，見 pipeline 文件說明。"""
+    收件人資訊（含 email），不要走這個函式——兩種輸出用途不同，見 pipeline 文件說明。
+
+    name_canonicals：這則訊息收件人「顯示名 -> Domino canonical name」的對照
+    （來自 extract_message_block() 抓的 socpimNameBtn 的 socpimnameemail 屬性）。
+    name_directory：整個 pipeline run 累積的「canonical name -> (中文名, email)」
+    對照表（來自 parse_validation_response() 持續攔截 Verse 自動發的驗證回應）。
+    兩者都沒有（例如舊呼叫方式，或這則訊息沒有任何無 email 收件人）時行為跟改之前
+    完全一樣。"""
     if not raw:
         return raw
+    name_canonicals = name_canonicals or {}
+    name_directory = name_directory or {}
     names = []
     for part in _split_recipient_entries(raw):
         m = re.match(r'^"?([^"<>]*)"?\s*<([^<>]+)>$', part)
@@ -289,8 +377,37 @@ def resolve_recipients(raw):
             name = email_to_name(part)
             names.append(name if name != part else part)
         else:
-            names.append(part)  # 已經是純姓名（Notes 內部位址常見），原樣保留
+            # 純姓名、沒有 email——查這則訊息抓到的 canonical name，
+            # 再去 Verse 自動驗證累積出來的對照表換中文名；兩邊都查不到就原樣保留
+            resolved = None
+            canonical = name_canonicals.get(part.strip())
+            if canonical:
+                if '@' in canonical:
+                    looked_up = email_to_name(canonical)
+                    resolved = looked_up if looked_up != canonical else None
+                else:
+                    entry = name_directory.get(canonical)
+                    if entry and entry[0]:
+                        resolved = entry[0]
+            names.append(resolved or part)
     return "、".join(names)
+
+
+def resolve_unresolved_canonicals(page, name_canonicals, name_directory, nonce):
+    """給定一個 block/header 的 name_canonicals（顯示名 -> canonical name/email），
+    把其中還沒進 name_directory、且真的是 Domino canonical name（沒有 @）的部分，
+    主動送一次 resolve_canonical_names_via_api() 補查，結果直接 merge 進
+    name_directory（就地修改）。沒有 nonce 或沒有需要補查的名字時直接跳過、不發
+    請求。回傳這次新解析到的筆數，方便呼叫端記錄/除錯。"""
+    unresolved = sorted({
+        c for c in (name_canonicals or {}).values()
+        if '@' not in c and c not in name_directory
+    })
+    if not unresolved or not nonce:
+        return 0
+    newly_resolved = resolve_canonical_names_via_api(page, unresolved, nonce)
+    name_directory.update(newly_resolved)
+    return len(newly_resolved)
 
 
 def quote_recipient_header(raw):
@@ -601,7 +718,20 @@ def extract_header_fields(page):
             const firstLine = el.innerText.split('\n')[0].trim();
             if (firstLine && !LABEL_NOISE.has(firstLine)) labelSet.add(firstLine);
         });
-        return { from, to, cc, bcc, date, label_ids: [...labelSet] };
+
+        // 同 extract_message_block()：收件人姓名的 socpimNameBtn 對照表，給
+        // resolve_recipients() 保底路徑（整串沒抓到任何訊息時）用
+        const nameCanonicals = {};
+        [recipEl, toccEl].forEach(el => {
+            if (!el) return;
+            el.querySelectorAll('.socpimNameBtn').forEach(btn => {
+                const t = btn.textContent.trim();
+                const cn = btn.getAttribute('socpimnameemail');
+                if (t && cn) nameCanonicals[t] = cn;
+            });
+        });
+
+        return { from, to, cc, bcc, date, label_ids: [...labelSet], name_canonicals: nameCanonicals };
     }""")
     # 「me」換成目前登入帳號的 email（不再寫死 shuhsing）
     header["to"] = substitute_me(header.get("to", ""))
@@ -712,7 +842,23 @@ def extract_message_block(page, idx):
             to = parsed.to; cc = parsed.cc; bcc = parsed.bcc;
         }
         const body = b.innerText || '';
-        return { from, to, cc, bcc, date, body };
+
+        // 每個收件人姓名的 socpimNameBtn 都帶 socpimnameemail 屬性——有 @ 的就是
+        // email，沒有的是 Domino canonical name（像 Chun-Hua Huang/elfc1/everlight
+        // 這種分廠/子公司英文命名慣例）。抓成 {顯示名: canonical} 給
+        // resolve_recipients() 對照 Verse 自動觸發的姓名驗證回應用，藏在 recip/tocc
+        // 兩個容器裡都要抓，不分 to/cc（顯示名衝突機率低，先用簡化版）。
+        const nameCanonicals = {};
+        [recipEl, toccEl].forEach(el => {
+            if (!el) return;
+            el.querySelectorAll('.socpimNameBtn').forEach(btn => {
+                const t = btn.textContent.trim();
+                const c = btn.getAttribute('socpimnameemail');
+                if (t && c) nameCanonicals[t] = c;
+            });
+        });
+
+        return { from, to, cc, bcc, date, body, name_canonicals: nameCanonicals };
     }""", idx)
 
 
@@ -969,6 +1115,32 @@ def main():
         ctx = browser.new_context(viewport={"width": 1280, "height": 900}, ignore_https_errors=True, locale="en-US")
         page = ctx.new_page()
         page.set_default_timeout(60000)
+
+        # Verse 自己不時會觸發姓名驗證 API（s_ValidationJson，不一定跟我們正在處理的
+        # 這封信有關，folder 列表渲染其他信件的名字也會觸發）——被動撿現成的回應累積
+        # 成 name_directory（見 parse_validation_response() 說明），同時從請求本身的
+        # header 撿 X-IBM-INotes-Nonce（頁面上找不到固定來源，只能這樣被動取得）。
+        # 一旦有 nonce，之後每則訊息就能用 resolve_canonical_names_via_api() 主動幫
+        # 沒解析到的收件人補送一次批次請求，不用一個一個點名片卡。
+        name_directory = {}
+        session_nonce = {"value": None}
+
+        def _on_response(resp):
+            if "s_ValidationJson" in resp.url:
+                try:
+                    name_directory.update(parse_validation_response(resp.text()))
+                except Exception:
+                    pass
+
+        def _on_request(req):
+            if "s_ValidationJson" in req.url:
+                nonce = req.headers.get("x-ibm-inotes-nonce")
+                if nonce:
+                    session_nonce["value"] = nonce
+
+        page.on("response", _on_response)
+        page.on("request", _on_request)
+
         try:
             print("登入 HCL Verse...")
             login(page)
@@ -1041,14 +1213,30 @@ def main():
                                                sent_date_for_block, contacts_state)
                     unid = block_unids[idx] or make_id(
                         meta["subject"], sender_email or sender_name, blk.get("date", ""))
+
+                    # 這則訊息裡沒有 email、只有 Domino canonical name 的收件人
+                    # （分廠/子公司英文命名慣例註冊的帳號），且還沒在 name_directory
+                    # 裡的，主動補送一次批次驗證請求解析成中文名——不用一個一個點
+                    # 名片卡。第一封信最開頭可能還沒攔到任何 nonce，這種情況就先跳過，
+                    # 該次留英文顯示名，下一封信/下一則訊息通常就有 nonce 了
+                    try:
+                        resolve_unresolved_canonicals(
+                            page, blk.get("name_canonicals"), name_directory, session_nonce["value"])
+                    except Exception as e:
+                        print(f"  ⚠️ 收件人姓名批次驗證失敗（不影響信件本身寫入）：{e}")
+
                     messages.append({
                         "unid": unid,
                         "sender_email": sender_email,
                         "sender_name": sender_name,
                         # RAG/Hindsight 只需要可讀的姓名，不需要 email——EML 那邊另外用
-                        # thread_header/thread_raw 的原始值（含 email、不砍引用），兩邊互不影響
-                        "to": resolve_recipients(substitute_me(blk.get("to", ""))),
-                        "cc": resolve_recipients(substitute_me(blk.get("cc", ""))),
+                        # thread_header/thread_raw 的原始值（含 email、不砍引用），兩邊互不影響。
+                        # name_canonicals/name_directory 讓沒有 <email> 的收件人（分廠/子公司
+                        # 英文 canonical name 註冊的帳號）也能轉中文，見 resolve_recipients() 說明
+                        "to": resolve_recipients(substitute_me(blk.get("to", "")),
+                                                  blk.get("name_canonicals"), name_directory),
+                        "cc": resolve_recipients(substitute_me(blk.get("cc", "")),
+                                                  blk.get("name_canonicals"), name_directory),
                         # 給 EML 用，保留 email；quote_recipient_header() 把「Lastname,
                         # Firstname」這種名字裡帶逗號的顯示名加上雙引號，避免 Gmail
                         # 解析 To:/Cc: 信頭時把逗號誤判成收件人分隔符、拆成兩個人
@@ -1068,12 +1256,20 @@ def main():
 
                 if not messages:
                     # 保底：一則都沒抓到就退回整串當一則處理，避免整封信被跳過
+                    try:
+                        resolve_unresolved_canonicals(
+                            page, thread_header.get("name_canonicals"), name_directory,
+                            session_nonce["value"])
+                    except Exception as e:
+                        print(f"  ⚠️ 收件人姓名批次驗證失敗（不影響信件本身寫入）：{e}")
                     messages = [{
                         "unid": make_id(meta["subject"], thread_sender_email, thread_date_str),
                         "sender_email": thread_sender_email,
                         "sender_name": thread_sender_name,
-                        "to": resolve_recipients(thread_header.get("to", "")),
-                        "cc": resolve_recipients(thread_header.get("cc", "")),
+                        "to": resolve_recipients(thread_header.get("to", ""),
+                                                  thread_header.get("name_canonicals"), name_directory),
+                        "cc": resolve_recipients(thread_header.get("cc", ""),
+                                                  thread_header.get("name_canonicals"), name_directory),
                         "to_raw": quote_recipient_header(thread_header.get("to", "")),
                         "cc_raw": quote_recipient_header(thread_header.get("cc", "")),
                         "date": thread_date_str,
