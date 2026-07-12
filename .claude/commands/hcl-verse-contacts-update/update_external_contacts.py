@@ -102,19 +102,21 @@ def upsert_email_mapping(email, name):
 
 
 def read_confirmed_rows(xlsx_path):
-    """讀 Excel，只取 canonical_name 有填的列，回傳 [(email, canonical_name), ...]。"""
+    """讀 Excel，只取 canonical_name 有填的列，回傳 (workbook, worksheet,
+    [(row_idx, email, canonical_name), ...])。呼叫端處理完後用 row_idx 把該列從
+    worksheet 刪掉再存檔，避免同一份 Excel 沒重新產生就重跑時被重複處理。"""
     wb = load_workbook(xlsx_path)
     ws = wb.active
     header = [c.value for c in ws[1]]
     email_idx = header.index("email")
     name_idx = header.index("canonical_name")
     rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         email = row[email_idx] if email_idx < len(row) else None
         name = row[name_idx] if name_idx < len(row) else None
         if email and name and str(name).strip():
-            rows.append((str(email).strip().lower(), str(name).strip()))
-    return rows
+            rows.append((row_idx, str(email).strip().lower(), str(name).strip()))
+    return wb, ws, rows
 
 
 def backfill_one(qdrant, hindsight, email, canonical_name):
@@ -175,7 +177,7 @@ def main():
         print(f"找不到 {xlsx_path}")
         return
 
-    rows = read_confirmed_rows(xlsx_path)
+    wb, ws, rows = read_confirmed_rows(xlsx_path)
     if not rows:
         print("Excel 裡沒有已填 canonical_name 的列，沒有要回填的")
         return
@@ -185,16 +187,25 @@ def main():
     state = load_state()
 
     summary = []
-    for email, canonical_name in rows:
+    processed_row_indices = []
+    for row_idx, email, canonical_name in rows:
         print(f"處理 {email} -> {canonical_name}")
         upsert_email_mapping(email, canonical_name)
         n = backfill_one(qdrant, hindsight, email, canonical_name)
         if email in state:
             state[email]["confirmed"] = True
         summary.append({"email": email, "canonical_name": canonical_name, "unids_updated": n})
+        processed_row_indices.append(row_idx)
         print(f"  ✓ 回填 {n} 筆")
 
     save_state(state)
+
+    # 處理完的列直接從 Excel 刪掉——email_mapping 已經 upsert 進去了，這列留著沒有
+    # 意義，留著反而會在同一份 Excel 沒重新產生就重跑時被重複處理一次。由後往前刪，
+    # 避免刪除時後面列的 row_idx 跟著往前移
+    for row_idx in sorted(processed_row_indices, reverse=True):
+        ws.delete_rows(row_idx)
+    wb.save(xlsx_path)
 
     print("\n=== 完成 ===")
     for s in summary:

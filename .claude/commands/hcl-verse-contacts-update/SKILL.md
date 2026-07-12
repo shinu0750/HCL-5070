@@ -5,7 +5,7 @@ description: >
   skill。讀回 hcl-verse-RAG 產生的 external_contacts.xlsx（人工填好 canonical_name
   的列），回填 email_mapping（PostgreSQL）、Qdrant（verse_emails collection 的
   from_name）、Hindsight（EID bank，保留舊 tags/metadata 重新 retain）。
-version: 1.0.0
+version: 1.1.0
 ---
 
 # 外部聯絡人回填 Pipeline
@@ -60,6 +60,11 @@ python .claude/commands/hcl-verse-contacts-update/update_external_contacts.py
    `confirmed=true`（reuse hcl-verse-RAG 的 `external_contacts_tracker.py`，不
    重複實作 state 檔案讀寫）——下次 hcl-verse-RAG 產生 Excel 時這幾位就不會再
    列出來
+5. **把處理完的列直接從 Excel 刪掉**（`ws.delete_rows()`，由後往前刪避免
+   index 跟著位移，刪完 `wb.save()` 存回原檔）——`email_mapping` 已經 upsert
+   進去了，這列留著沒有意義；更重要的是避免同一份 Excel 沒重新產生就重跑時
+   被整批重複處理一次（upsert 沒差，但 Qdrant 全表相關查詢、Hindsight 重新
+   `retain()` 都是白做工）
 
 ## 技術細節
 
