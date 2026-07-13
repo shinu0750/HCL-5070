@@ -1353,18 +1353,19 @@ def main():
                     m["_attachment_data"] = attachments_data
                     m["attachments"] = save_attachments(attachments_data, m["unid"])
 
-                    # 會議記錄/報價單附件 -> RAGAnything（共用知識庫）+ Hindsight（僅會議記錄全文）。
+                    # 會議記錄/報價單附件 -> 只先另存到 MEETING_QUOTE_STAGING_DIR，不在歸檔
+                    # 當下同步跑 RAGAnything（單一附件解析可能要跑好幾分鐘，會拖慢整支
+                    # pipeline）。事後另外執行 meeting_quote_batch_process.py 批次處理。
                     # 只認 .pdf、檔名或主旨符合關鍵字的附件；失敗只印警告，不中斷這封信原本的
                     # RAG/Hindsight/EML/搬移流程。
                     try:
                         mq_records = process_meeting_quote_attachments(
-                            hindsight, m["unid"], meta["subject"], m["sender_name"],
+                            m["unid"], meta["subject"], m["sender_name"],
                             m["sent_date"], attachments_data)
                         for r in mq_records:
-                            flag = "✓" if r["raganything_ok"] else "✗"
-                            extra = f", Hindsight全文{'✓' if r['hindsight_ok'] else '✗'}" if r["hindsight_ok"] is not None else ""
+                            flag = "✓" if r["saved"] else "✗"
                             print(f"    {flag} 會議記錄/報價單附件[{','.join(r['labels'])}] {r['name'][:40]}"
-                                  f" -> RAGAnything{extra}" + (f"（{r.get('error','')[:120]}）" if r.get("error") else ""))
+                                  f" -> 已存檔待批次處理" + (f"（{r.get('error','')[:120]}）" if r.get("error") else ""))
                     except Exception as e:
                         print(f"  ⚠️ 會議記錄/報價單附件處理失敗（不影響信件本身寫入）：{e}")
 

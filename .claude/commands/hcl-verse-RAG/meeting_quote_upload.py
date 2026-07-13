@@ -7,18 +7,23 @@
 只處理 .pdf 附件——RAGAnything/MinerU 理論上能解析 docx/pptx，但目前只在 PDF 上
 實測過，其他格式先跳過，之後有需要再擴充。
 
-流程：
-  1. 附件 bytes 寫進 RAGAnything 的 inputs 目錄（檔名前綴 unid 避免同名衝突，
-     跟 verse_archive_pipeline.py 的 ATTACHMENTS_DIR 命名慣例一致）
-  2. `docker compose exec raganything python3 /app/scripts/process_pdf.py <檔名>`
-     解析並併入共用知識庫（不分 project/workspace，機密內容也丟——已跟使用者
-     確認過可以接受，見對話記錄）
-  3. 只有「會議記錄」類的附件，額外去 RAGAnything 的 output 目錄撈解析出來的
-     markdown 全文，寫進 Hindsight（EID bank），讓 reflect()/recall() 之後
-     可以直接查到會議記錄全文，不用每次都重新開會議記錄 PDF
+**分兩階段，不在歸檔當下同步解析**（3.15.0 改版）：`upload_to_raganything()`
+（`docker compose exec` 跑 MinerU 版面解析 + LLM 圖表說明）單一附件可能要跑好幾分鐘，
+`PROCESS_TIMEOUT_SEC=1800` 甚至給到 30 分鐘容錯——如果在 verse_archive_pipeline.py
+的歸檔迴圈裡同步呼叫，整支 pipeline 會被這一個附件卡住這麼久，其他信件都得等。
+改成：
+  1. **歸檔當下**（`process_meeting_quote_attachments()`）：只把符合關鍵字的 .pdf
+     附件另存一份到 `MEETING_QUOTE_STAGING_DIR`（部門共用網路磁碟），旁邊多存一個
+     同名 `.json` sidecar 記 unid/subject/sender_name/sent_date/labels，不呼叫
+     RAGAnything，不寫 Hindsight，幾乎不花時間，不拖慢歸檔本身
+  2. **歸檔全部跑完後另外執行**（`meeting_quote_batch_process.py`）：掃描
+     `MEETING_QUOTE_STAGING_DIR`，逐一讀 sidecar 取回 metadata → 送進 RAGAnything
+     解析 → 「會議記錄」類額外把解析出的全文寫進 Hindsight → 成功的搬到
+     `done/` 子目錄（沿用 EML 上傳 Gmail 的 done 慣例，失敗的留原地方便重跑）
 """
 import os
 import re
+import json
 import hashlib
 import subprocess
 
@@ -27,6 +32,13 @@ WSL_ROOT = r"C:\Users\EID\Documents\Claude\ShuHsing\WSL"
 RAGANYTHING_INPUTS_DIR = os.path.join(WSL_ROOT, "inputs")
 RAGANYTHING_OUTPUT_DIR = os.path.join(WSL_ROOT, "output")
 DOCKER_COMPOSE_FILE = "/mnt/c/Users/EID/Documents/Claude/ShuHsing/WSL/docker-compose.yml"
+
+# 分兩階段設計下的「暫存區」：歸檔當下只存檔到這裡，事後 meeting_quote_batch_process.py
+# 才真的送進 RAGAnything。部門共用網路磁碟，可用同名環境變數覆寫（跟 EML_OUTPUT_DIR
+# 同樣的慣例）
+MEETING_QUOTE_STAGING_DIR = os.environ.get(
+    "MEETING_QUOTE_STAGING_DIR",
+    r"\\10.11.1.40\工程管理暨智慧製造處\公用區-Hermes\meeting minutes")
 
 # 解析一份文件（尤其是圖表多的會議記錄）可能要跑好幾分鐘（MinerU 版面解析 + LLM
 # 圖片/表格說明），給寬鬆的 timeout，避免長文件被誤判成掛掉
@@ -55,6 +67,27 @@ def _safe_filename(name):
 
 def _stem(filename):
     return os.path.splitext(filename)[0]
+
+
+def save_for_batch_processing(unid, name, data, subject, sender_name, sent_date, labels):
+    """歸檔當下呼叫：只存檔，不觸發 RAGAnything/Hindsight（見檔案開頭兩階段說明）。
+    PDF 跟同名 .json sidecar 一起存到 MEETING_QUOTE_STAGING_DIR，sidecar 記
+    meeting_quote_batch_process.py 事後處理需要的 metadata（RAGAnything 只認檔案
+    本身，不會保留這些資訊，一定要另外存）。檔名沿用 unid 前綴慣例，避免同名衝突、
+    也方便回頭比對 Qdrant/Hindsight 裡的同一筆資料。"""
+    os.makedirs(MEETING_QUOTE_STAGING_DIR, exist_ok=True)
+    fname = f"{unid}_{_safe_filename(name)}"
+    pdf_path = os.path.join(MEETING_QUOTE_STAGING_DIR, fname)
+    with open(pdf_path, 'wb') as f:
+        f.write(data)
+    json_path = os.path.join(MEETING_QUOTE_STAGING_DIR, _stem(fname) + ".json")
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            "unid": unid, "original_name": name, "subject": subject,
+            "sender_name": sender_name, "sent_date": sent_date,
+            "labels": sorted(labels),
+        }, f, ensure_ascii=False, indent=2)
+    return pdf_path
 
 
 def save_to_inputs(unid, name, data):
@@ -147,11 +180,12 @@ def write_meeting_to_hindsight(hindsight, unid, attachment_name, markdown_text,
     )
 
 
-def process_meeting_quote_attachments(hindsight, unid, subject, sender_name, sent_date,
-                                       attachments_data):
+def process_meeting_quote_attachments(unid, subject, sender_name, sent_date, attachments_data):
     """attachments_data: [(name, bytes), ...]（來自 download_attachments()）。
-    只挑 .pdf、且符合會議記錄/報價單關鍵字的附件處理，其餘原樣跳過。
-    回傳每個候選附件的處理紀錄，供呼叫端 print/記錄用，不影響信件本身的
+    只挑 .pdf、且符合會議記錄/報價單關鍵字的附件，另存到 MEETING_QUOTE_STAGING_DIR
+    （見檔案開頭兩階段說明），不觸發 RAGAnything/Hindsight——那是
+    meeting_quote_batch_process.py 事後才做的事，這裡只要快、不能拖慢歸檔本身。
+    回傳每個候選附件的存檔紀錄，供呼叫端 print/記錄用，不影響信件本身的
     RAG/Hindsight/EML/搬移流程——這一段失敗只印警告，不拋例外中斷主流程。"""
     records = []
     for name, data in attachments_data or []:
@@ -161,32 +195,12 @@ def process_meeting_quote_attachments(hindsight, unid, subject, sender_name, sen
         if not labels:
             continue
 
-        rec = {"name": name, "labels": sorted(labels), "raganything_ok": False, "hindsight_ok": None}
+        rec = {"name": name, "labels": sorted(labels), "saved": False}
         try:
-            _, fname = save_to_inputs(unid, name, data)
-            ok, detail = upload_to_raganything(fname)
-            rec["raganything_ok"] = ok
-            if not ok:
-                rec["error"] = detail[:500]
+            save_for_batch_processing(unid, name, data, subject, sender_name, sent_date, labels)
+            rec["saved"] = True
         except Exception as e:
             rec["error"] = str(e)
-            records.append(rec)
-            continue
-
-        if "meeting" in labels and rec["raganything_ok"]:
-            try:
-                md_text = find_parsed_markdown(fname)
-                if md_text:
-                    result = write_meeting_to_hindsight(
-                        hindsight, unid, name, md_text, subject, sender_name, sent_date)
-                    result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
-                    rec["hindsight_ok"] = "validation error" not in result_text.lower()
-                else:
-                    rec["hindsight_ok"] = False
-                    rec["error"] = "找不到解析後的 markdown（output 目錄沒對應檔案）"
-            except Exception as e:
-                rec["hindsight_ok"] = False
-                rec["error"] = str(e)
 
         records.append(rec)
     return records
