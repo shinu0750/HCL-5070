@@ -205,7 +205,7 @@ def main():
         print("進度已重置")
 
     print("初始化 Qdrant / Hindsight / OpenAI...")
-    qdrant       = QdrantClient(url=QDRANT_URL)
+    qdrant       = QdrantClient(url=QDRANT_URL, timeout=30)
     openai_cli   = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
     hindsight    = HindsightClient(HINDSIGHT_URL) if not args.dry_run else None
     ensure_collection(qdrant)

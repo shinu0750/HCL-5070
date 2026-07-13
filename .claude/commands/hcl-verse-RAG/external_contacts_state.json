@@ -42,7 +42,7 @@
     "count": 1,
     "first_seen": "2026-07-09 05:16",
     "last_seen": "2026-07-09 05:16",
-    "confirmed": false
+    "confirmed": true
   },
   "noahtu@micb2b.com": {
     "seen_names": [
@@ -51,6 +51,76 @@
     "count": 1,
     "first_seen": "2026-07-08 23:18",
     "last_seen": "2026-07-08 23:18",
-    "confirmed": false
+    "confirmed": true
+  },
+  "tata_hsieh@jsrgr.com": {
+    "seen_names": [
+      "Hsieh, Tata"
+    ],
+    "count": 4,
+    "first_seen": "2026-07-08 11:54",
+    "last_seen": "2026-07-09 22:34",
+    "confirmed": true
+  },
+  "jeffh@cicorp.com.tw": {
+    "seen_names": [
+      "'CIC/Jeff Ho'"
+    ],
+    "count": 17,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": true
+  },
+  "kanek@cicorp.com.tw": {
+    "seen_names": [
+      "'CIC/Kane Kang'"
+    ],
+    "count": 17,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": true
+  },
+  "helenh@cicorp.com.tw": {
+    "seen_names": [
+      "'CIC/Helen Huang'"
+    ],
+    "count": 17,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": true
+  },
+  "timl@cicorp.com.tw": {
+    "seen_names": [
+      "'timl'"
+    ],
+    "count": 17,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": true
+  },
+  "ethanh@cicorp.com.tw": {
+    "seen_names": [],
+    "count": 17,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": true
+  },
+  "andyh@cicorp.com.tw": {
+    "seen_names": [
+      "'CIC/Andy Hsu'"
+    ],
+    "count": 17,
+    "first_seen": "2026-06-13 11:45",
+    "last_seen": "2026-07-09 18:34",
+    "confirmed": true
+  },
+  "jenho-machine@outlook.com": {
+    "seen_names": [
+      "仁和機械 Jenho-machine"
+    ],
+    "count": 8,
+    "first_seen": "2026-06-17 09:09",
+    "last_seen": "2026-07-13 11:35",
+    "confirmed": true
   }
 }

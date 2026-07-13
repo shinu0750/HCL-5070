@@ -30,7 +30,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 # ── 固定路徑（沿用既有 OAuth 設定）────────────────────────────────────────────
-GMAIL_DIR        = os.path.expanduser("~/Documents/eml to gamil")
+# 代簽別人帳號測試時，用 GMAIL_OAUTH_DIR 指向另一組 credentials.json/token.json，
+# 避免覆蓋自己的 token（仿照 hcl-notes-approval 的 HCL_ENV_FILE 多帳號模式）
+GMAIL_DIR        = os.environ.get("GMAIL_OAUTH_DIR", os.path.expanduser("~/Documents/eml to gamil"))
 CREDENTIALS_FILE = os.path.join(GMAIL_DIR, "credentials.json")
 TOKEN_FILE       = os.path.join(GMAIL_DIR, "token.json")
 SCOPES           = ['https://www.googleapis.com/auth/gmail.modify']

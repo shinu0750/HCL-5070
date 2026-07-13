@@ -237,7 +237,7 @@ def main():
         print("Excel 裡沒有已填 canonical_name 的列，沒有要回填的")
         return
 
-    qdrant = QdrantClient(url=QDRANT_URL)
+    qdrant = QdrantClient(url=QDRANT_URL, timeout=30)
     hindsight = HindsightClient(HINDSIGHT_URL)
     state = load_state()
 

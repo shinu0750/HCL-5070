@@ -24,7 +24,7 @@ EMBEDDING_MODEL    = os.environ.get("EMBEDDING_MODEL",    "jina-embed")
 COLLECTION  = "verse_emails"
 OUTPUT_FILE = os.path.join(tempfile.gettempdir(), "verse_rag_search_result.json")
 
-qdrant        = QdrantClient(url=QDRANT_URL)
+qdrant        = QdrantClient(url=QDRANT_URL, timeout=30)
 openai_client = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
 
 

@@ -8,10 +8,13 @@ HCL Verse 歸檔 pipeline
 兩種用途、兩份不同粒度的資料，互不影響：
 - RAG(Qdrant)/Hindsight：討論串（thread）拆成「訊息級」處理，每則訊息各自用 Domino
   UNID 當 document_id（不是 hash 畫面文字），各自獨立一筆；每則的引用歷史
-  （quote-in-body）會被截斷，避免重複內容灌爆 Hindsight；同時比對被砍掉的引用身份
-  資訊，配對出 reply_to_unid 存進 payload/metadata，記錄訊息間的回覆關聯
+  （quote-in-body）會被截斷，避免重複內容灌爆 Hindsight。不記錄 thread_id/
+  reply_to_unid 這種跨訊息關聯——每天執行時，同一討論串較早的訊息通常前幾天
+  就已經歸檔並移出 Verse，當下這一批根本看不到完整討論串，硬要配對只會得到
+  不完整、誤導性的關聯，之後如果真的需要，應該用後處理（從已存進去的資料反查）
+  而不是在歸檔當下猜
 - EML：整封信/整串完整存檔（不截斷、不砍引用），保留信件原貌，供人工回溯查閱、
-  上傳 Gmail 用
+  上傳 Gmail 用；同理不組 In-Reply-To/References，每則訊息在 Gmail 都是獨立的信
 
 用法：
     python3 verse_archive_pipeline.py [max_results] [--no-move] [--headful] [--by-messages]
@@ -22,13 +25,21 @@ HCL Verse 歸檔 pipeline
     --by-messages   max_results 改成「訊息數」上限（累計到達即停），而不是預設的
                     「信件/列數」上限——討論串會拆成多則訊息，一封信可能不只一則
 """
-import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse, subprocess
+import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse, subprocess, socket
 from datetime import datetime, timedelta
 import requests
 from email.message import EmailMessage
 import email.policy
 from email.utils import formatdate
 warnings.filterwarnings('ignore')  # 關閉內部 SSL 憑證警告
+
+# 實測發現：對 QdrantClient(timeout=30) 這種 client 層級的 timeout 參數沒有生效
+# （卡在 10.11.1.40:6333 的 CloseWait 連線，超過 30 秒還是沒有拋出例外）——很可能
+# 是連線池重用了一條已經被對方關閉的 keep-alive 連線，request 層級的 timeout 沒有
+# 正確套用到這個底層 socket 上。改用 process 全域的 socket timeout 當最後一道防線，
+# 不管哪一個 library/呼叫沒有正確處理自己的 timeout，底層 socket 卡超過這個秒數
+# 都會直接拋 socket.timeout，不會再無限期卡死整支 pipeline。
+socket.setdefaulttimeout(60)
 
 # Windows 主控台預設用 cp950（Big5），印不出 ✓/✗ 等符號會直接 UnicodeEncodeError 崩潰
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
@@ -51,7 +62,7 @@ from openai import OpenAI
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.expanduser("~/Claude/HCL"))
-from quote_stripper import strip_quoted_history, strip_quoted_history_with_identity
+from quote_stripper import strip_quoted_history
 from email_mapping import email_to_name, resolve_me
 from external_contacts_tracker import (
     load_state as load_contacts_state,
@@ -60,6 +71,7 @@ from external_contacts_tracker import (
     has_new_or_updated as contacts_have_new_or_updated,
 )
 from external_contacts_excel import generate_excel as generate_contacts_excel
+from meeting_quote_upload import process_meeting_quote_attachments
 
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://localhost:8888/mcp/")
 
@@ -71,7 +83,7 @@ class HindsightClient:
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2024-11-05", "capabilities": {},
                        "clientInfo": {"name": "verse-archive", "version": "1.0"}},
-        })
+        }, timeout=30)
         self.session_id = resp.headers.get("mcp-session-id")
 
     def retain(self, content, document_id, timestamp, metadata, context, bank_id="EID", tags=None):
@@ -103,8 +115,13 @@ OPENAI_KEY    = os.environ.get("OPENAI_API_KEY",  "")
 EMBEDDING_API_BASE = os.environ.get("EMBEDDING_API_BASE", "http://localhost:8081/v1")
 EMBEDDING_MODEL    = os.environ.get("EMBEDDING_MODEL",    "jina-embed")
 
-SOURCE_FOLDER = "04Done"
-TARGET_FOLDER = "domdom"
+SOURCE_FOLDER = os.environ.get("VERSE_SOURCE_FOLDER", "04Done")
+TARGET_FOLDER = os.environ.get("VERSE_TARGET_FOLDER", "domdom")
+# 一次性測試用：來源資料夾本身已經是人工分類過的專案信件時，可用這個環境變數
+# 直接標記 proj tag（例如 VERSE_PROJ_TAG=JSR量產建置）。proj 分類 backfill 腳本本身
+# 仍暫緩（見 SKILL.md「proj 分類（暫緩）」），這只是先接受這次已知的手動分類結果，
+# 不是重新啟用自動判斷
+PROJ_TAG      = os.environ.get("VERSE_PROJ_TAG", "").strip() or None
 COLLECTION    = "verse_emails"
 # 實測發現 jina-embeddings-v4 實際回傳 2048 維（不是原本假設的 1024），
 # Qdrant collection 已重建成 2048 維，這裡要同步，否則 upsert 100% 失敗
@@ -149,8 +166,27 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 NOTIFY_SCRIPT = os.path.join(
     _PROJECT_ROOT, ".claude", "commands", "hcl-notes-approval", "scripts", "hcl_write_hindsight.py")
 
-qdrant        = QdrantClient(url=QDRANT_URL)
-openai_client = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
+
+# 實測遇過：NAS 那端連線斷過一次（TCP CloseWait），QdrantClient 預設不設 timeout，
+# 底層 request 會對著一個死掉的連線永久卡死（不是拋例外，是真的 hang，已有的
+# try/except 完全救不到，因為它從來沒有機會執行到 except）。設 timeout=30 跟
+# 全域 socket.setdefaulttimeout() 兩層防護都試過，實測還是會卡超過 60 秒以上不吐
+# 例外——研判是 keep-alive 連線池重用了一條「批次跑到一半、閒置一陣子後被 NAS
+# 端悄悄關掉」的舊連線，client 層/socket 層的 timeout 設定都套用不到這個殭屍連線
+# 上。已用真實批次跑 3 次重現（不是偶發）；改成每次呼叫都開一支全新的
+# QdrantClient（見 _fresh_qdrant()）才能繞開這個問題，跟手動 curl 測試每次都是
+# 新連線、每次都秒回是同一個道理。
+qdrant        = QdrantClient(url=QDRANT_URL, timeout=30)
+
+
+def _fresh_qdrant():
+    """已知不能重用長壽命的 qdrant client（見上面說明），每次呼叫都開一支新的，
+    避免連線池裡的殭屍連線造成無限期卡死。"""
+    return QdrantClient(url=QDRANT_URL, timeout=30)
+# timeout=60：本地 embedding server 是 on-demand socket 喚醒架構，冷啟動要等
+# backend 醒過來（正常幾秒到十幾秒），沒設 timeout 的話一旦網路/backend 有異常
+# 會無限期卡住（跟下面 qdrant/attachment 下載是同一類問題）
+openai_client = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE, timeout=60)
 
 
 # ── Qdrant / embedding / id ────────────────────────────────────────────────
@@ -177,7 +213,7 @@ def already_indexed(unid):
     過的內容蓋掉，跳過寫入才安全。查詢失敗（例如 collection 還不存在）視為
     「還沒索引過」，讓後面正常走寫入流程。"""
     try:
-        points = qdrant.retrieve(collection_name=COLLECTION, ids=[id_to_uuid(unid)])
+        points = _fresh_qdrant().retrieve(collection_name=COLLECTION, ids=[id_to_uuid(unid)])
         return len(points) > 0
     except Exception:
         return False
@@ -186,14 +222,6 @@ def already_indexed(unid):
 def make_row_signature(subject, sender, snippet):
     """安全閥用的『這一列信件』簽章，跟訊息級 id 無關。"""
     return hashlib.md5(f"{sender}|{subject}|{snippet}".encode()).hexdigest()
-
-
-def make_thread_id(subject):
-    normalized = re.sub(
-        r'^(回覆[:：]\s*|RE[:：]\s*|FW[:：]\s*|Fwd[:：]\s*)+',
-        '', subject, flags=re.IGNORECASE
-    ).strip()
-    return hashlib.md5(normalized.encode()).hexdigest()
 
 
 def id_to_uuid(h):
@@ -524,12 +552,47 @@ def login(page):
     page.wait_for_timeout(2000)
 
 
+def _expand_treeitem_by_name(page, name):
+    """展開左側導覽樹中名稱符合 name 的節點，用於巢狀資料夾路徑（例如
+    「工程專案 > JSR量產建置」）——子資料夾預設不在可點擊的 DOM 節點裡，
+    要先展開父資料夾才點得到。
+
+    這個 widget 是 Dojo 元件，展開行為綁在 `.folder-icon` 子元素的真實
+    click 事件上（實測過：用 page.evaluate() 對 <li> 本身發 JS 合成 click()
+    不會觸發展開，一定要用 Playwright 對 `.folder-icon` 做真的滑鼠點擊）。
+    """
+    candidates = page.locator(f'[role="treeitem"]:has-text("{name}")')
+    n = candidates.count()
+    for i in range(n):
+        el = candidates.nth(i)
+        try:
+            txt = el.inner_text(timeout=1500).strip()
+        except Exception:
+            continue
+        first_line = txt.split('\n')[0].strip()
+        if first_line == name or name in first_line:
+            icon = el.locator('.folder-icon').first
+            try:
+                icon.click(timeout=3000)
+            except Exception:
+                el.click(timeout=3000)
+            page.wait_for_timeout(1000)
+            return True
+    return False
+
+
 def open_folder(page, folder_name):
     """
     點擊左側資料夾樹中名為 folder_name 的資料夾，載入其信件清單。
     Inbox 有專屬 class `.inbox`；自訂資料夾（如 04Done）只能靠名字點，
     且可能藏在「資料夾 / Folders」摺疊群組裡，需先展開。
+
+    folder_name 支援用 ">" 表示巢狀路徑（例如 "工程專案>JSR量產建置"）——
+    會依序展開每一層父資料夾，才點擊最後一層。
     """
+    path_parts = [p.strip() for p in folder_name.split(">") if p.strip()]
+    folder_name = path_parts[-1]
+
     # 1) 先嘗試展開「資料夾 / Folders」群組（若存在且未展開）
     page.evaluate("""(name) => {
         const groups = [...document.querySelectorAll('[role="treeitem"], .folder-group, .nav-group')];
@@ -545,6 +608,10 @@ def open_folder(page, folder_name):
         }
     }""", folder_name)
     page.wait_for_timeout(800)
+
+    # 1b) 巢狀路徑：依序展開中間每一層父資料夾（最後一層留給步驟 2 點擊）
+    for parent in path_parts[:-1]:
+        _expand_treeitem_by_name(page, parent)
 
     # 2) 在左側導航區找含 folder_name 的 treeitem 並點擊（排除右側 move popup）
     candidates = page.locator(
@@ -648,13 +715,6 @@ def _strip_ui_noise(raw, subject):
 def clean_body(raw, subject):
     """先剝 UI chrome 雜訊，再砍掉引用歷史（quote_stripper）。"""
     return strip_quoted_history(_strip_ui_noise(raw, subject))
-
-
-def clean_body_and_identify(raw, subject):
-    """跟 clean_body() 一樣，但額外回傳被砍掉那段引用歷史的身份資訊
-    (quoted_sender, quoted_date)，給之後配對 reply_to_unid 用。
-    回傳 (body_clean, quoted_sender, quoted_date)。"""
-    return strip_quoted_history_with_identity(_strip_ui_noise(raw, subject))
 
 
 def parse_msg_row(item):
@@ -878,42 +938,6 @@ def extract_message_block(page, idx):
     }""", idx)
 
 
-# ── 建立訊息間的回覆關聯（reply_to_unid）──────────────────────────────────────
-def match_reply_to(messages):
-    """幫每則訊息找出它引用/回覆的是同一個 thread 裡的哪一則，寫進 reply_to_unid。
-    依據是 clean_body_and_identify() 抓到的「被引用者姓名/日期」，跟同一批訊息的
-    sender_name/sender_email/sent_date 比對。找不到或無法唯一判斷就留 None，不亂猜。
-    """
-    for m in messages:
-        quoted_sender = m.pop("_quoted_sender", None)
-        quoted_date = m.pop("_quoted_date", None)
-        m["reply_to_unid"] = None
-        if not quoted_sender:
-            continue
-
-        qs = quoted_sender.strip()
-        candidates = []
-        for other in messages:
-            if other is m:
-                continue
-            name = (other.get("sender_name") or "").strip()
-            email = (other.get("sender_email") or "").strip()
-            if not name and not email:
-                continue
-            if qs == name or (email and qs.lower() == email.lower()) or \
-               (name and (qs in name or name in qs)):
-                candidates.append(other)
-
-        if len(candidates) == 1:
-            m["reply_to_unid"] = candidates[0]["unid"]
-        elif len(candidates) > 1 and quoted_date:
-            quoted_norm = normalize_sent_date(quoted_date)
-            exact = [c for c in candidates if quoted_norm and c.get("sent_date") == quoted_norm]
-            if len(exact) == 1:
-                m["reply_to_unid"] = exact[0]["unid"]
-    return messages
-
-
 # ── 附件下載 / EML 打包（沿用 export 邏輯，整串完整存檔，不截斷）────────────────
 def get_attachment_links(page):
     return page.evaluate("""() => {
@@ -943,7 +967,7 @@ def download_attachments(links, cookies):
             nm = (att['name'] or '').strip()
             name = urllib.parse.unquote(nm) if nm else None
         name = name or "attachment"
-        resp = session.get(att['href'], verify=False)
+        resp = session.get(att['href'], verify=False, timeout=120)
         if resp.status_code == 200:
             attachments.append((name, resp.content))
     return attachments
@@ -982,12 +1006,11 @@ def _sent_date_to_rfc2822(sent_date):
 
 
 def make_message_id(unid):
-    """用 UNID 組出 RFC 5322 的 Message-ID，讓 mail client（含 Gmail）能靠標準信頭
-    自動重建討論串關聯，不用自己另外做 UI 呈現。"""
+    """用 UNID 組出 RFC 5322 的 Message-ID（每則訊息自己的識別碼，跟回覆關聯無關）。"""
     return f"<{unid}@verse.ecic.com.tw>"
 
 
-def pack_eml(meta, body, attachments, unid=None, reply_to_unid=None):
+def pack_eml(meta, body, attachments, unid=None):
     msg = EmailMessage(policy=email.policy.SMTP)
     msg['From']     = meta.get('from') or meta.get('sender', '')
     msg['To']       = meta.get('to') or USERNAME
@@ -998,10 +1021,6 @@ def pack_eml(meta, body, attachments, unid=None, reply_to_unid=None):
     msg['X-Source'] = 'HCL Verse / 04Done'
     if unid:
         msg['Message-ID'] = make_message_id(unid)
-    if reply_to_unid:
-        parent_id = make_message_id(reply_to_unid)
-        msg['In-Reply-To'] = parent_id
-        msg['References'] = parent_id
     msg.set_content(body)
     for name, data in attachments:
         msg.add_attachment(data, maintype='application', subtype='octet-stream', filename=name)
@@ -1086,10 +1105,15 @@ def move_to_folder(page, folder=TARGET_FOLDER):
     except Exception:
         return "error_no_popup"
 
+    # Verse 自己的資料夾搜尋框對含括號的名稱完全比對不到（實測：打完整
+    # 「已上傳Gmail(暫時找信)」回傳 0 筆，但打去掉括號後綴的「已上傳Gmail」能
+    # 正確篩到剩這一個資料夾）——搜尋只用去掉結尾括號註記的版本，實際點擊仍用
+    # 完整 folder 名稱做 has-text 比對，確保點到的是名稱完全相符的那個
+    search_term = re.sub(r'[（(][^）)]*[）)]\s*$', '', folder).strip() or folder
     folder_input = page.locator("div.folder-tray-float.show input.folder-search-input")
     folder_input.click()
     folder_input.fill("")
-    folder_input.type(folder, delay=50)
+    folder_input.type(search_term, delay=50)
     page.wait_for_timeout(1000)
 
     folder_item = page.locator(
@@ -1120,6 +1144,11 @@ def main():
     hindsight = HindsightClient(HINDSIGHT_URL)
     results = []
     seen_rows = set()
+    # 有些信件（實測案例：Confidential/秘密 機密信件）Verse 本身就會停用「移動到
+    # 資料夾」這個動作（不是自動化的 bug，等過 30 秒讓畫面完全載入、翻過 More
+    # actions 選單都確認過真的沒有這個選項），移動一定會失敗。這種信只略過、
+    # 記進這個集合，之後選列時跳過，不要讓它擋住後面所有信的處理進度。
+    skip_row_sigs = set()
 
     # 未在 email_mapping 查到的聯絡人（外部廠商/離職同仁）追蹤用；deep copy 一份
     # 起始快照，跑完後拿來比對這次有沒有新增/更新，決定要不要重新產生 Excel + 通知
@@ -1160,6 +1189,8 @@ def main():
         try:
             print("登入 HCL Verse...")
             login(page)
+            if PROJ_TAG:
+                print(f"（本次會額外標記 Hindsight tag：proj:{PROJ_TAG}）")
             print(f"開啟資料夾「{SOURCE_FOLDER}」...")
             open_folder(page, SOURCE_FOLDER)
 
@@ -1176,16 +1207,30 @@ def main():
                     print("資料夾已清空，結束。")
                     break
 
-                item = rows.first
+                # 依序找第一封「不在略過名單裡」的信——不能盲用 rows.first，否則
+                # 一封移不動的信（見 skip_row_sigs 註解）會永遠卡在最上面，擋住
+                # 後面所有信的處理
+                total_rows = rows.count()
+                item = None
                 meta = None
-                for _ in range(6):  # 首列可能還在渲染，重試
-                    meta = parse_msg_row(item)
-                    if meta:
-                        break
-                    page.wait_for_timeout(600)
-                    item = page.locator('.seq-msg-row').first
+                for idx in range(total_rows):
+                    candidate = rows.nth(idx)
+                    cand_meta = None
+                    for _ in range(6):  # 該列可能還在渲染，重試
+                        cand_meta = parse_msg_row(candidate)
+                        if cand_meta:
+                            break
+                        page.wait_for_timeout(600)
+                        candidate = page.locator('.seq-msg-row').nth(idx)
+                    if not cand_meta:
+                        continue
+                    cand_sig = make_row_signature(cand_meta["subject"], cand_meta["sender"], cand_meta["snippet"])
+                    if cand_sig in skip_row_sigs:
+                        continue
+                    item, meta = candidate, cand_meta
+                    break
                 if not meta:
-                    print("  ⚠️ 無法解析第一列，停止。")
+                    print("  可見信件都已略過或無法解析，結束。")
                     break
 
                 # 安全閥：若這一列跟上一輪處理過的一樣（代表移動失敗它還在頂部）→ 停止
@@ -1208,8 +1253,6 @@ def main():
                 if thread_sender_email and not thread_sender_found:
                     track_unknown_contact(thread_sender_email, thread_sender_name,
                                            thread_sent_date, contacts_state)
-                thread_id = make_thread_id(meta["subject"])
-
                 # 逐則訊息：各自 clean+砍引用歷史，各自獨立 RAG+Hindsight
                 messages = []
                 for idx in range(n_blocks):
@@ -1220,8 +1263,7 @@ def main():
                         # Verse 自己判定這則已被後面訊息的引用完整涵蓋，只給精簡摘要
                         # （沒有完整表頭可抓）——不用重複處理
                         continue
-                    body_clean, quoted_sender, quoted_date = clean_body_and_identify(
-                        blk["body"], meta["subject"])
+                    body_clean = clean_body(blk["body"], meta["subject"])
                     if len(body_clean) < 3:
                         continue
                     sender_email, sender_name, sender_found = resolve_sender(blk.get("from"))
@@ -1268,11 +1310,7 @@ def main():
                         # 給 EML 用：只剝 Verse 自己的 UI chrome，不砍引用歷史（引用是原始信件
                         # 內容的一部分，EML 要保留信件原貌，不能動）
                         "eml_body": _strip_ui_noise(blk["body"], meta["subject"]),
-                        "_quoted_sender": quoted_sender,
-                        "_quoted_date": quoted_date,
                     })
-
-                match_reply_to(messages)  # 幫每則訊息配對它回覆的是同一 thread 裡的哪一則
 
                 if not messages:
                     # 保底：一則都沒抓到就退回整串當一則處理，避免整封信被跳過
@@ -1298,7 +1336,6 @@ def main():
                         "sent_date": thread_sent_date,
                         "body": clean_body(thread_raw, meta["subject"]),
                         "eml_body": _strip_ui_noise(thread_raw, meta["subject"]),
-                        "reply_to_unid": None,
                     }]
 
                 rec = {"subject": meta["subject"], "from": thread_sender_name,
@@ -1316,6 +1353,21 @@ def main():
                     m["_attachment_data"] = attachments_data
                     m["attachments"] = save_attachments(attachments_data, m["unid"])
 
+                    # 會議記錄/報價單附件 -> RAGAnything（共用知識庫）+ Hindsight（僅會議記錄全文）。
+                    # 只認 .pdf、檔名或主旨符合關鍵字的附件；失敗只印警告，不中斷這封信原本的
+                    # RAG/Hindsight/EML/搬移流程。
+                    try:
+                        mq_records = process_meeting_quote_attachments(
+                            hindsight, m["unid"], meta["subject"], m["sender_name"],
+                            m["sent_date"], attachments_data)
+                        for r in mq_records:
+                            flag = "✓" if r["raganything_ok"] else "✗"
+                            extra = f", Hindsight全文{'✓' if r['hindsight_ok'] else '✗'}" if r["hindsight_ok"] is not None else ""
+                            print(f"    {flag} 會議記錄/報價單附件[{','.join(r['labels'])}] {r['name'][:40]}"
+                                  f" -> RAGAnything{extra}" + (f"（{r.get('error','')[:120]}）" if r.get("error") else ""))
+                    except Exception as e:
+                        print(f"  ⚠️ 會議記錄/報價單附件處理失敗（不影響信件本身寫入）：{e}")
+
                 # ① RAG 索引 + ③ Hindsight retain（逐則訊息各自一筆）
                 rag_ok = hindsight_ok = skipped_dup = 0
                 for m in messages:
@@ -1326,7 +1378,7 @@ def main():
                     try:
                         text = f"{meta['subject']} {m['body']}"
                         embedding = get_embedding(text)
-                        qdrant.upsert(collection_name=COLLECTION, points=[PointStruct(
+                        _fresh_qdrant().upsert(collection_name=COLLECTION, points=[PointStruct(
                             id=id_to_uuid(m["unid"]),
                             vector=embedding,
                             payload={
@@ -1334,8 +1386,7 @@ def main():
                                 "from_email": m["sender_email"], "from_name": m["sender_name"],
                                 "to": m["to"], "cc": m["cc"],
                                 "date": m["date"], "sent_date": m["sent_date"],
-                                "thread_id": thread_id, "unid": m["unid"],
-                                "reply_to_unid": m.get("reply_to_unid"),
+                                "unid": m["unid"],
                                 "attachments": m.get("attachments", []),
                             })])
                         rag_ok += 1
@@ -1348,14 +1399,9 @@ def main():
                             "from_email": m["sender_email"],
                             "from_name":  m["sender_name"],
                             "to":         m["to"],
-                            "thread_id":  thread_id,
                             "unid":       m["unid"],
                             "sent_date":  m["sent_date"],
                         }
-                        # Hindsight schema 要求 metadata 值是字串——reply_to_unid 是 None
-                        # （原始信，沒有回覆對象）時整個省略這個 key，傳 null 會被 validation 擋下來
-                        if m.get("reply_to_unid"):
-                            metadata["reply_to_unid"] = m["reply_to_unid"]
                         result = hindsight.retain(
                             content=(
                                 f"主旨：{meta['subject']}\n"
@@ -1370,7 +1416,7 @@ def main():
                             # 是為了讓 reflect()/recall() 能用 tags=["mail"] 過濾，
                             # 避免跟同一個 EID bank 裡其他 skill 寫入的資料（例如
                             # hcl-notes-approval 的簽核記錄）混在一起污染查詢結果
-                            tags=["mail"],
+                            tags=(["mail", f"proj:{PROJ_TAG}"] if PROJ_TAG else ["mail"]),
                             context=f"HCL Verse 信件：主旨「{meta['subject']}」，寄件者 {m['sender_name']}",
                         )
                         result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
@@ -1388,8 +1434,8 @@ def main():
                 # ② EML 匯出：每則訊息各自一個 .eml（跟 RAG/Hindsight 那份訊息級+去重的
                 # 資料是分開的兩種用途）。內文只剝 Verse 的 UI chrome，不砍引用歷史——
                 # 引用是原始信件內容的一部分，EML 要保留信件原貌讓人回溯查閱、上傳 Gmail。
-                # 帶 Message-ID/In-Reply-To（用 unid/reply_to_unid 組），Gmail 收到後會照
-                # 這些標準信頭自動重建討論串關聯。
+                # 只帶 Message-ID（每則自己的識別碼），不組 In-Reply-To/References——
+                # 每則訊息在 Gmail 都是獨立的信，不自動合併討論串（見檔案開頭說明）。
                 try:
                     eml_paths, all_attachment_names = [], []
                     for i, m in enumerate(messages):
@@ -1400,8 +1446,7 @@ def main():
                             "subject": meta["subject"], "date": m["date"],
                             "sent_date": m["sent_date"],
                         }
-                        eml_bytes = pack_eml(eml_meta, m["eml_body"], attachments,
-                                             unid=m["unid"], reply_to_unid=m.get("reply_to_unid"))
+                        eml_bytes = pack_eml(eml_meta, m["eml_body"], attachments, unid=m["unid"])
                         # 檔名就用 unid：主旨/寄件者組出來的檔名不好查詢，
                         # unid 本身就是唯一、可回頭比對 Qdrant/Hindsight 的 key
                         fname = f"{m['unid']}.eml"
@@ -1437,8 +1482,14 @@ def main():
                           f"Hindsight {hindsight_ok}/{len(messages)}, move={status})")
                     if status != "moved":
                         results.append(rec)
-                        print("  ✗ 移動失敗，停止以免重複處理。")
-                        break
+                        # RAG/Hindsight 這封已經寫完了，只是移不動（實測過：Verse
+                        # 對某些信件——例如機密信——本身就會停用移動這個動作，不是
+                        # 自動化的 bug，重試也不會好）。記進略過名單，繼續處理下一
+                        # 封，不要讓這一封擋住整批進度；這封留在原資料夾，之後人工
+                        # 處理
+                        skip_row_sigs.add(row_sig)
+                        print(f"  ↷ 移動失敗，略過這封（留在原資料夾），繼續下一封：{meta['subject'][:40]}")
+                        continue
                     page.wait_for_timeout(1500)  # 等清單刷新
 
                 results.append(rec)

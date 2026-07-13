@@ -138,7 +138,7 @@ def do_model(hindsight: HindsightClient, query: str) -> dict:
 
 def do_search(query: str, top_k: int = 5) -> dict:
     print(f"[search] {query} (top {top_k})")
-    qdrant = QdrantClient(url=QDRANT_URL)
+    qdrant = QdrantClient(url=QDRANT_URL, timeout=30)
     cli    = OpenAI(api_key=OPENAI_KEY or "local-no-key-needed", base_url=EMBEDDING_API_BASE)
 
     existing = {c.name for c in qdrant.get_collections().collections}
