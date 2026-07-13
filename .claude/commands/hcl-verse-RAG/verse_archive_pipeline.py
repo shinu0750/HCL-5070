@@ -675,6 +675,42 @@ def open_folder(page, folder_name):
     page.wait_for_timeout(500)
 
 
+def ensure_thread_grouping_off(page, n_rows=8):
+    """檢查目前資料夾前幾列有沒有討論串分組跡象（`Count N` 徽章），有的話點擊
+    `[class*='toggle-threads']` 關閉。
+
+    3.16.1 才發現：這個開關很可能不是 Verse 伺服器端的帳號設定，而是存在瀏覽器
+    本地（cookie/localStorage）的偏好——`main()` 每次執行都是全新 `browser.new_
+    context()`，不會保存/重用任何前次 session 的狀態，所以「之前關過」不代表這次
+    還是關的，**每次執行都要重新檢查**，不能只憑上次記錄假設。使用者也明確要求
+    一定要關閉分組，理由是分組信件量過多時可能造成異常，所以固定當作每次歸檔的
+    必要前置步驟，不是只有被要求視覺檢查時才做。
+
+    不管開/關，訊息級抓取邏輯本身兩種畫面下都驗證過正確（見 SKILL.md「已知缺口」），
+    這裡只是照使用者要求，降低分組信件量過大時的未知風險，不是修正正確性問題。
+    """
+    rows = page.locator('.seq-msg-row')
+    count = min(rows.count(), n_rows)
+    has_count_badge = False
+    for i in range(count):
+        try:
+            txt = rows.nth(i).inner_text(timeout=1500)
+        except Exception:
+            continue
+        if 'Count' in txt:
+            has_count_badge = True
+            break
+    if not has_count_badge:
+        print("（討論串分組檢查：目前是關閉狀態，不用點擊）")
+        return
+    print("（討論串分組檢查：發現分組跡象，點擊關閉...）")
+    try:
+        page.click("[class*='toggle-threads']", timeout=5000)
+        page.wait_for_timeout(2000)
+    except Exception as e:
+        print(f"（討論串分組切換按鈕點擊失敗，跳過：{e}）")
+
+
 # ── 信件解析 / 清理（沿用 index + export 既有邏輯）────────────────────────────
 UI_NOISE = {
     "More actions", "Mark as unread", "Mark as Needs Action",
@@ -1199,6 +1235,7 @@ def main():
                 print(f"（本次會額外標記 Hindsight tag：proj:{PROJ_TAG}）")
             print(f"開啟資料夾「{SOURCE_FOLDER}」...")
             open_folder(page, SOURCE_FOLDER)
+            ensure_thread_grouping_off(page)
 
             count = page.locator('.seq-msg-row').count()
             limit_unit = "則訊息" if BY_MESSAGES else "封"
