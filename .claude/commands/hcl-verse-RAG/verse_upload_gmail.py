@@ -8,11 +8,14 @@ Verse EML → Gmail 上傳（參數化版，供 hcl-verse-RAG pipeline 串接）
 用法：
     python3 verse_upload_gmail.py [eml_folder] [--label L] [--done DIR] [--log FILE]
 
-預設：
-    eml_folder = ~/verse-export
+預設（EML_OUTPUT_DIR 環境變數可覆寫共用網路磁碟根目錄，預設
+//10.11.1.40/工程管理暨智慧製造處/公用區-Hermes/eml）：
+    eml_folder = {EML_OUTPUT_DIR}/Undo   （待上傳，不分帳號各自存）
     --label    = Notes_Import_v2
-    --done     = ~/Documents/eml to gamil/eml_done
+    --done     = {EML_OUTPUT_DIR}/Done   （已上傳，同樣是共用網路磁碟）
     憑證/token = ~/Documents/eml to gamil/{credentials,token}.json
+    （GMAIL_OAUTH_DIR 環境變數可覆寫成其他帳號專用的憑證/token 目錄，
+    但 Undo/Done 一律是共用網路磁碟，不會因為換帳號而分開存）
 """
 import os, sys, base64, time, json, shutil, re, argparse, tempfile
 from pathlib import Path
@@ -42,16 +45,24 @@ DELAY_SECONDS    = 1
 
 
 # EML 分支 B 實際存放位置：部門共用網路磁碟（跟 verse_archive_pipeline.py 的
-# EML_OUTPUT_DIR 用同一組預設值 + 同名環境變數，維持兩邊一致，不用互相 import）
-DEFAULT_EML_DIR = os.environ.get(
+# EML_OUTPUT_DIR 用同一組預設值 + 同名環境變數，維持兩邊一致，不用互相 import）。
+# 待上傳／已上傳都放在同一個共用資料夾底下的 Undo/Done 子目錄，不分帳號各自存
+# 本機——之前用「各帳號本機 eml_done」設計時，共用 Undo 池裡誰的信件都混在一起，
+# 用不同帳號的 GMAIL_OAUTH_DIR 跑上傳會把整個共用池的信全部掃進當次那個帳號的
+# Gmail（實測發生過），改成 Done 也放共用網路磁碟後，至少能讓所有人看到目前
+# Undo 裡還累積了哪些待上傳的信、Done 裡已經上傳過哪些，不會被鎖在某人的本機
+# Documents 資料夾看不到
+EML_ROOT_DIR = os.environ.get(
     "EML_OUTPUT_DIR", r"\\10.11.1.40\工程管理暨智慧製造處\公用區-Hermes\eml")
+DEFAULT_EML_DIR = os.path.join(EML_ROOT_DIR, "Undo")
+DEFAULT_DONE_DIR = os.path.join(EML_ROOT_DIR, "Done")
 
 
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("eml_folder", nargs="?", default=DEFAULT_EML_DIR)
     ap.add_argument("--label", default="Notes_Import_v2")
-    ap.add_argument("--done",  default=os.path.join(GMAIL_DIR, "eml_done"))
+    ap.add_argument("--done",  default=DEFAULT_DONE_DIR)
     ap.add_argument("--log",   default=os.path.join(GMAIL_DIR, "verse_upload_log.txt"))
     return ap.parse_args()
 
@@ -156,12 +167,20 @@ def main():
         sys.exit(1)
 
     all_eml = sorted(f for f in eml_dir.rglob("*") if f.suffix.lower().strip() == '.eml')
-    remaining = all_eml
+    # load_progress() 讀 log 裡記錄過的 SUCCESS 路徑，排除掉已經上傳成功的檔案——
+    # 正常情況下上傳成功會把檔案搬出 eml_dir，下次自然掃不到；這層過濾要防的是
+    # 「上傳成功但搬移那一步失敗」的邊界情況：檔案還留在原地，若沒有這層過濾，
+    # 重跑會把同一封信再匯入 Gmail 一次，造成重複
+    already_uploaded = load_progress(args.log)
+    remaining = [f for f in all_eml if str(f) not in already_uploaded]
+    skipped_already = len(all_eml) - len(remaining)
 
-    print(f"📧 {args.eml_folder} 共 {len(all_eml)} 封，待上傳 {len(remaining)}")
+    print(f"📧 {args.eml_folder} 共 {len(all_eml)} 封，待上傳 {len(remaining)}"
+          + (f"（略過 {skipped_already} 封 log 記錄已上傳過）" if skipped_already else ""))
     if not remaining:
         print("🎉 沒有待上傳的 EML")
-        json.dump({"total": len(all_eml), "uploaded": 0, "failed": 0,
+        json.dump({"total": len(all_eml), "skipped_already_uploaded": skipped_already,
+                   "uploaded": 0, "failed": 0,
                    "label": args.label, "done_folder": args.done, "results": []},
                   open(OUTPUT_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
         return
@@ -197,7 +216,8 @@ def main():
         if i % BATCH_SIZE == 0:
             time.sleep(DELAY_SECONDS)
 
-    summary = {"total": len(all_eml), "uploaded": success, "failed": fail,
+    summary = {"total": len(all_eml), "skipped_already_uploaded": skipped_already,
+               "uploaded": success, "failed": fail,
                "label": args.label, "done_folder": str(done_path), "results": results}
     json.dump(summary, open(OUTPUT_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     print(f"\n✓ 上傳完成：成功 {success}、失敗 {fail} → 標籤「{args.label}」，已搬到 {done_path}")

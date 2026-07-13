@@ -149,6 +149,12 @@ EML_OUTPUT_DIR = os.environ.get(
     r"\\10.11.1.40\工程管理暨智慧製造處\公用區-Hermes\eml",
 )
 os.makedirs(EML_OUTPUT_DIR, exist_ok=True)
+# 新產生的 .eml 一律先放共用資料夾底下的 Undo 子目錄（不分帳號各自存），
+# 等 verse_upload_gmail.py 上傳成功後再搬到同一個共用資料夾底下的 Done
+# （見 SKILL.md「已知缺口」：之前用「各帳號本機 eml_done」設計，導致共用
+# Undo 池裡誰的信件都混在一起，很難看出目前累積了哪些人的哪些信還沒上傳）
+EML_UNDO_DIR = os.path.join(EML_OUTPUT_DIR, "Undo")
+os.makedirs(EML_UNDO_DIR, exist_ok=True)
 # 附件另存一份（跟 .eml 放同一個網路資料夾底下的子目錄），檔名前綴 unid 避免同名衝突
 ATTACHMENTS_DIR = os.path.join(EML_OUTPUT_DIR, "attachments")
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
@@ -1451,7 +1457,7 @@ def main():
                         # 檔名就用 unid：主旨/寄件者組出來的檔名不好查詢，
                         # unid 本身就是唯一、可回頭比對 Qdrant/Hindsight 的 key
                         fname = f"{m['unid']}.eml"
-                        eml_path = os.path.join(EML_OUTPUT_DIR, fname)
+                        eml_path = os.path.join(EML_UNDO_DIR, fname)
                         with open(eml_path, 'wb') as f:
                             f.write(eml_bytes)
                         eml_paths.append(eml_path)
