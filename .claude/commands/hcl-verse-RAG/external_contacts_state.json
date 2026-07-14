@@ -127,18 +127,18 @@
     "seen_names": [
       "大中機械設計部"
     ],
-    "count": 5,
+    "count": 7,
     "first_seen": "2026-06-25 15:12",
-    "last_seen": "2026-07-13 10:31",
+    "last_seen": "2026-07-14 09:38",
     "confirmed": false
   },
   "catherinel@cicorp.com.tw": {
     "seen_names": [
       "'CIC/Catherine Li'"
     ],
-    "count": 15,
+    "count": 16,
     "first_seen": "2026-03-02 18:35",
-    "last_seen": "2026-07-08 15:56",
+    "last_seen": "2026-07-14 09:52",
     "confirmed": false
   },
   "paogan5@gmail.com": {
@@ -189,17 +189,19 @@
     "seen_names": [
       "Miyanishi, Takashi"
     ],
-    "count": 8,
-    "first_seen": "2026-04-15 15:20",
+    "count": 12,
+    "first_seen": "2026-01-08 04:57",
     "last_seen": "2026-07-02 11:35",
     "confirmed": false
   },
   "houei.liu@msa.hinet.net": {
     "seen_names": [
-      "houei.liu"
+      "houei.liu",
+      "豐楹",
+      "houei.liu@msa.hinet.net"
     ],
-    "count": 54,
-    "first_seen": "2026-03-05 14:09",
+    "count": 57,
+    "first_seen": "2026-01-14 10:49",
     "last_seen": "2026-06-26 17:28",
     "confirmed": false
   },
@@ -208,8 +210,8 @@
       "大中機械業務部",
       "大中機械 業務部"
     ],
-    "count": 23,
-    "first_seen": "2026-02-23 10:11",
+    "count": 26,
+    "first_seen": "2026-01-26 03:58",
     "last_seen": "2026-06-24 16:27",
     "confirmed": false
   },
@@ -226,8 +228,8 @@
     "seen_names": [
       "Torii, Naota"
     ],
-    "count": 9,
-    "first_seen": "2026-04-08 13:21",
+    "count": 10,
+    "first_seen": "2026-01-08 04:57",
     "last_seen": "2026-06-11 15:30",
     "confirmed": false
   },
@@ -345,10 +347,11 @@
   "jasonliao@futai.com.tw": {
     "seen_names": [
       "廖俊賢 Jason Liao",
-      "廖俊賢 專案經理"
+      "廖俊賢 專案經理",
+      "'廖俊賢 Jason Liao'"
     ],
-    "count": 88,
-    "first_seen": "2026-02-13 16:07",
+    "count": 118,
+    "first_seen": "2026-01-07 15:04",
     "last_seen": "2026-05-14 15:46",
     "confirmed": false
   },
@@ -356,18 +359,19 @@
     "seen_names": [
       "合鑫機械"
     ],
-    "count": 4,
-    "first_seen": "2026-03-04 15:05",
+    "count": 5,
+    "first_seen": "2026-02-06 10:53",
     "last_seen": "2026-05-12 10:33",
     "confirmed": false
   },
   "joannechen@futai.com.tw": {
     "seen_names": [
       "陳秀娟",
-      "joannechen"
+      "joannechen",
+      "秘書部-陳秀娟"
     ],
-    "count": 70,
-    "first_seen": "2026-02-13 16:07",
+    "count": 95,
+    "first_seen": "2026-01-13 11:21",
     "last_seen": "2026-05-11 15:42",
     "confirmed": false
   },
@@ -375,27 +379,29 @@
     "seen_names": [
       "永光化學-王品淇"
     ],
-    "count": 66,
-    "first_seen": "2026-02-13 16:07",
+    "count": 74,
+    "first_seen": "2026-01-06 15:46",
     "last_seen": "2026-05-11 15:42",
     "confirmed": false
   },
   "jim@futai.com.tw": {
     "seen_names": [
       "林奕廷 儀控",
-      "林奕廷-儀控"
+      "林奕廷-儀控",
+      "'林奕廷-儀控'"
     ],
-    "count": 64,
-    "first_seen": "2026-02-13 16:07",
+    "count": 84,
+    "first_seen": "2026-01-13 11:21",
     "last_seen": "2026-05-11 15:42",
     "confirmed": false
   },
   "mosesliu@futai.com.tw": {
     "seen_names": [
-      "劉家豪 機械"
+      "劉家豪 機械",
+      "'劉家豪 機械'"
     ],
-    "count": 64,
-    "first_seen": "2026-02-13 16:07",
+    "count": 85,
+    "first_seen": "2026-01-13 11:21",
     "last_seen": "2026-05-11 15:42",
     "confirmed": false
   },
@@ -403,8 +409,8 @@
     "seen_names": [
       "王西幸 經理"
     ],
-    "count": 62,
-    "first_seen": "2026-02-13 16:07",
+    "count": 74,
+    "first_seen": "2026-01-13 11:21",
     "last_seen": "2026-05-11 15:42",
     "confirmed": false
   },
@@ -412,8 +418,8 @@
     "seen_names": [
       "曾飛龍"
     ],
-    "count": 62,
-    "first_seen": "2026-02-13 16:07",
+    "count": 74,
+    "first_seen": "2026-01-13 11:21",
     "last_seen": "2026-05-11 15:42",
     "confirmed": false
   },
@@ -451,8 +457,8 @@
     "seen_names": [
       "user5"
     ],
-    "count": 2,
-    "first_seen": "2026-03-04 11:33",
+    "count": 3,
+    "first_seen": "2026-01-22 14:39",
     "last_seen": "2026-04-15 16:39",
     "confirmed": false
   },
@@ -773,6 +779,13 @@
     "count": 1,
     "first_seen": "2026-03-04 11:33",
     "last_seen": "2026-03-04 11:33",
+    "confirmed": false
+  },
+  "shu-hsing_huang/elfc3/everlight%everlight@everlight.com.tw": {
+    "seen_names": [],
+    "count": 29,
+    "first_seen": "2025-12-26 11:23",
+    "last_seen": "2026-02-10 10:31",
     "confirmed": false
   }
 }

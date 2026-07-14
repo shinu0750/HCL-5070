@@ -25,7 +25,7 @@ HCL Verse 歸檔 pipeline
     --by-messages   max_results 改成「訊息數」上限（累計到達即停），而不是預設的
                     「信件/列數」上限——討論串會拆成多則訊息，一封信可能不只一則
 """
-import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse, subprocess, socket
+import os, tempfile, sys, re, json, hashlib, warnings, urllib.parse, subprocess, socket, shutil
 from datetime import datetime, timedelta
 import requests
 from email.message import EmailMessage
@@ -155,6 +155,10 @@ os.makedirs(EML_OUTPUT_DIR, exist_ok=True)
 # Undo 池裡誰的信件都混在一起，很難看出目前累積了哪些人的哪些信還沒上傳）
 EML_UNDO_DIR = os.path.join(EML_OUTPUT_DIR, "Undo")
 os.makedirs(EML_UNDO_DIR, exist_ok=True)
+# 只讀不寫，不 makedirs——查這個 unid 的 .eml 是否已經上傳完成過（見
+# verse_upload_gmail.py 的 --done 預設值，兩邊共用同一個網路磁碟路徑）。
+# 換帳號重新整理到別人已經歸檔過的同一封信時，分支 B 不用重新產生/重新上傳。
+EML_DONE_DIR = os.path.join(EML_OUTPUT_DIR, "Done")
 # 附件另存一份（跟 .eml 放同一個網路資料夾底下的子目錄），檔名前綴 unid 避免同名衝突
 ATTACHMENTS_DIR = os.path.join(EML_OUTPUT_DIR, "attachments")
 os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
@@ -225,9 +229,20 @@ def already_indexed(unid):
         return False
 
 
-def make_row_signature(subject, sender, snippet):
-    """安全閥用的『這一列信件』簽章，跟訊息級 id 無關。"""
-    return hashlib.md5(f"{sender}|{subject}|{snippet}".encode()).hexdigest()
+def make_row_signature(subject, sender, snippet, date="", row_id=""):
+    """安全閥用的『這一列信件』簽章，跟訊息級 id 無關。
+
+    優先用 row_id（`.seq-msg-row` 的 `aria-labelledby` 屬性去掉 "-msg-info" 尾綴，
+    見 parse_msg_row()）——這是 Verse 這一列信件本身的穩定 id，開信前、不用展開/
+    攔截網路請求就讀得到。實測發現同一組人來回同主旨的信（尤其是機密信，摘要都被
+    Verse 蓋成同一句「[Confidential/秘密] ...」，日期甚至可能同一天）單靠
+    subject|sender|snippet|date 文字雜湊還是會撞——3 封不同的機密信只因為主旨/
+    寄件者/摘要/日期都相同，被誤判成同一封已略過的信，後面幾封完全沒被嘗試就整批
+    放棄（見 SKILL.md 已知缺口）。row_id 抓不到時（理論上不該發生，保底防禦）才退回
+    文字雜湊。"""
+    if row_id:
+        return row_id
+    return hashlib.md5(f"{sender}|{subject}|{snippet}|{date}".encode()).hexdigest()
 
 
 def id_to_uuid(h):
@@ -762,17 +777,29 @@ def clean_body(raw, subject):
 def parse_msg_row(item):
     try:
         lines = [l.strip() for l in item.inner_text().strip().split("\n") if l.strip()]
-        sender, subject, snippet = "", "", ""
+        sender, subject, snippet, date = "", "", "", ""
         for i, line in enumerate(lines):
             if line == "From" and i+1 < len(lines):
                 sender = lines[i+1]
+                # 緊接在寄件者名字後面、"Subject" 標籤前的那一行是這一列的日期/時間
+                # （例如 "Jul 10" 或 "9:52 AM"）——拿來讓 make_row_signature() 區分
+                # 主旨/寄件者/摘要都相同但實際是不同封的信（見該函式註解）
+                if i+2 < len(lines) and lines[i+2] != "Subject":
+                    date = lines[i+2]
             elif line == "Subject" and i+1 < len(lines):
                 subject = lines[i+1]
             elif line == "Message abstract" and i+1 < len(lines):
                 snippet = lines[i+1]
         if not subject:
             return None
-        return {"sender": sender, "subject": subject, "snippet": snippet}
+        row_id = ""
+        try:
+            labelled_by = item.get_attribute("aria-labelledby") or ""
+            if labelled_by.endswith("-msg-info"):
+                row_id = labelled_by[: -len("-msg-info")]
+        except Exception:
+            row_id = ""
+        return {"sender": sender, "subject": subject, "snippet": snippet, "date": date, "row_id": row_id}
     except Exception:
         return None
 
@@ -1267,7 +1294,8 @@ def main():
                         candidate = page.locator('.seq-msg-row').nth(idx)
                     if not cand_meta:
                         continue
-                    cand_sig = make_row_signature(cand_meta["subject"], cand_meta["sender"], cand_meta["snippet"])
+                    cand_sig = make_row_signature(cand_meta["subject"], cand_meta["sender"], cand_meta["snippet"],
+                                                   cand_meta.get("date", ""), cand_meta.get("row_id", ""))
                     if cand_sig in skip_row_sigs:
                         continue
                     item, meta = candidate, cand_meta
@@ -1277,7 +1305,8 @@ def main():
                     break
 
                 # 安全閥：若這一列跟上一輪處理過的一樣（代表移動失敗它還在頂部）→ 停止
-                row_sig = make_row_signature(meta["subject"], meta["sender"], meta["snippet"])
+                row_sig = make_row_signature(meta["subject"], meta["sender"], meta["snippet"],
+                                              meta.get("date", ""), meta.get("row_id", ""))
                 if row_sig in seen_rows:
                     print(f"  ⚠️ 偵測到重複信件（移動可能失敗），停止：{meta['subject'][:40]}")
                     break
@@ -1391,6 +1420,20 @@ def main():
                 att_links = get_attachment_links(page)
                 cookies   = {c['name']: c['value'] for c in page.context.cookies()}
                 for m in messages:
+                    # 這個 UNID 的 .eml 已經在 Done——但 Done 是所有帳號共用的單一池，
+                    # 不代表「這次登入的帳號」自己的 Gmail 已經有這封信（3.19.0 曾經誤判
+                    # 成「已完成不用再處理」，換帳號整理到別人已上傳過的信時會漏掉這個
+                    # 帳號自己該有的 Gmail 副本）。正確做法：不用重新下載附件/重新組
+                    # .eml（內容跟已存在的那份完全相同，白工），但仍要複製一份進 Undo
+                    # 讓 verse_upload_gmail.py 重新評估——它是否要真的上傳，交給它自己
+                    # 那份帳號專屬的 log 去重（load_progress()）判斷，不是這裡判斷。
+                    if os.path.exists(os.path.join(EML_DONE_DIR, f"{m['unid']}.eml")):
+                        m["_eml_done_reuse"] = True
+                        m["_attachment_data"] = []
+                        m["attachments"] = []
+                        print(f"  ↻ EML 已存在 Done，重用內容排入 Undo（不重新下載附件）："
+                              f"unid={m['unid']}，{m['sender_name']}")
+                        continue
                     own_links = [a for a in att_links if m["unid"] and m["unid"] in a['href']]
                     attachments_data = download_attachments(own_links, cookies) if own_links else []
                     m["_attachment_data"] = attachments_data
@@ -1481,8 +1524,18 @@ def main():
                 # 只帶 Message-ID（每則自己的識別碼），不組 In-Reply-To/References——
                 # 每則訊息在 Gmail 都是獨立的信，不自動合併討論串（見檔案開頭說明）。
                 try:
-                    eml_paths, all_attachment_names = [], []
+                    eml_paths, all_attachment_names, eml_reused = [], [], 0
                     for i, m in enumerate(messages):
+                        fname = f"{m['unid']}.eml"
+                        if m.get("_eml_done_reuse"):
+                            # 內容跟 Done 裡那份完全相同，不用重新組——但還是要放進
+                            # Undo，讓這次上傳（可能是不同帳號的 GMAIL_OAUTH_DIR/log）
+                            # 自己判斷要不要真的上傳，不能在這裡就直接斷定不用處理
+                            eml_path = os.path.join(EML_UNDO_DIR, fname)
+                            shutil.copy2(os.path.join(EML_DONE_DIR, fname), eml_path)
+                            eml_paths.append(eml_path)
+                            eml_reused += 1
+                            continue
                         attachments = m.get("_attachment_data", [])
                         eml_meta = {
                             "from": m["sender_email"] or m["sender_name"],
@@ -1493,7 +1546,6 @@ def main():
                         eml_bytes = pack_eml(eml_meta, m["eml_body"], attachments, unid=m["unid"])
                         # 檔名就用 unid：主旨/寄件者組出來的檔名不好查詢，
                         # unid 本身就是唯一、可回頭比對 Qdrant/Hindsight 的 key
-                        fname = f"{m['unid']}.eml"
                         eml_path = os.path.join(EML_UNDO_DIR, fname)
                         with open(eml_path, 'wb') as f:
                             f.write(eml_bytes)
@@ -1501,6 +1553,7 @@ def main():
                         all_attachment_names.extend(a[0] for a in attachments)
                     rec["eml"] = eml_paths
                     rec["attachments"] = all_attachment_names
+                    rec["eml_reused_from_done"] = eml_reused
                 except Exception as e:
                     rec["eml"] = f"fail: {e}"
                     print(f"  ✗ EML 失敗：{e}")
@@ -1546,6 +1599,7 @@ def main():
     moved        = sum(1 for r in results if r.get("move") == "moved")
     rag_ok_total       = sum(r.get("rag_ok", 0) for r in results)
     hindsight_ok_total = sum(r.get("hindsight_ok", 0) for r in results)
+    eml_reused_total   = sum(r.get("eml_reused_from_done", 0) for r in results)
     message_total      = sum(r.get("message_count", 0) for r in results)
     sent_dates = sorted(d[:10] for d in (r.get("sent_date") or "" for r in results) if d)
     summary = {
@@ -1557,13 +1611,17 @@ def main():
         ),  # 本批信件實際寄件日範圍
         "processed": len(results), "message_total": message_total,
         "rag_ok": rag_ok_total, "hindsight_ok": hindsight_ok_total, "moved": moved,
+        "eml_reused_from_done": eml_reused_total,
         "emails": results,
     }
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
     print(f"\n✓ 完成：處理 {len(results)} 封（共 {message_total} 則訊息），"
           f"RAG {rag_ok_total}/{message_total} / Hindsight {hindsight_ok_total}/{message_total} 成功，"
-          f"移動 {moved} 封 → {TARGET_FOLDER}")
+          f"移動 {moved} 封 → {TARGET_FOLDER}"
+          + (f"，{eml_reused_total} 則重用 Done 既有 EML 內容（排進 Undo，"
+             f"是否真的上傳交給 verse_upload_gmail.py 自己的帳號 log 判斷）"
+             if eml_reused_total else ""))
     print(f"  結果已寫入 {OUTPUT_FILE}")
 
     # 未在 email_mapping 查到的聯絡人：有新增/更新才存檔 + 重新產生 Excel + 通知 Google Chat

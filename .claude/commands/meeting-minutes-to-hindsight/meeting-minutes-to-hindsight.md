@@ -8,12 +8,11 @@
 /meeting-minutes-to-hindsight <PDF路徑或資料夾路徑>
 ```
 
-## Step 0：先問使用者這次要用哪個 proj tag
+## Step 0：先問使用者這次要用哪個 tag
 
-**開始處理前一定要先問**，不要用檔名或業務編號自己猜：「這批要寫入 Hindsight 的 `proj:` tag
-要用哪一個專案？」拿到答案後，這個值固定套用到這次處理的所有檔案（同一批不用每個檔案重問）。
-格式跟 `hcl-verse-RAG` SKILL.md 裡 `VERSE_PROJ_TAG` 的既有慣例一致，用底線不用空白（例如
-`四廠JSR_B棟HVM產線建置`）。
+**開始處理前一定要先問**，不要用檔名或業務編號自己猜：「這批要寫入 Hindsight 的 tag 要用
+哪一個專案？」拿到答案後，這個值原封不動當一個獨立 tag 使用（**不加 `proj:` 前綴**），固定
+套用到這次處理的所有檔案（同一批不用每個檔案重問）。
 
 ## Step 1：讀取 PDF、判斷文件類型
 
@@ -31,7 +30,7 @@
 - `document_id` = `meeting-{文件編號}`（例如 `meeting-C2448-FT-ECIC-M003`），沒有明確文件編號
   時退回 `meeting-{檔名 md5 前12碼}`
 - `timestamp` = 會議日期＋開始時間，ISO8601（例如 `2026-01-16T09:30:00`）
-- `tags` = `["proj:{proj值}", "會議記錄"]`
+- `tags` = `["{proj值}", "會議記錄"]`
 - `content` = 工程名稱/業務編號/會議主題/日期地點、主席/記錄/出席人員（業主/廠商分開列）、
   決議事項分兩類：Info（備查，直接列）、待辦事項（帶 `[執行單位:X,期限:Y]`）
 
@@ -39,7 +38,7 @@
 - `document_id` = `quote-{報價單號或見積番号}`，沒有明確編號時退回
   `quote-{檔名 md5 前12碼}`
 - `timestamp` = 報價日期（無明確日期時用文件裡最早出現的日期，都沒有則省略此欄位）
-- `tags` = `["proj:{proj值}", "報價單"]`
+- `tags` = `["{proj值}", "報價單"]`
 - `content` = 廠商名稱、品名/型號/規格重點（容量、材質、關鍵尺寸）、金額（如有揭露）、
   交期/有效期限（如有）
 
@@ -51,7 +50,7 @@
 ```json
 {
   "items": [
-    {"content": "...", "timestamp": "2026-01-16T09:30:00", "tags": ["proj:C2448", "會議記錄"], "document_id": "meeting-C2448-FT-ECIC-M003"}
+    {"content": "...", "timestamp": "2026-01-16T09:30:00", "tags": ["C2448", "會議記錄"], "document_id": "meeting-C2448-FT-ECIC-M003"}
   ],
   "async": true
 }
@@ -95,6 +94,7 @@ Hindsight 寫入狀態（completed/failed）、抽取出幾筆事實單元（`re
 
 ## 版本記錄
 
+- 1.5.0 (2026-07-14): 專案 tag 不加 `proj:` 前綴，使用者指定的值原封不動當獨立 tag。
 - 1.4.0 (2026-07-14): 新增 Step 4「搬移歸檔」——Hindsight 寫入成功後，把 PDF＋同檔名 json
   sidecar 依類型搬到 `meeting minutes\meeting minutes`（會議記錄）或
   `meeting minutes\quotation`（報價單）；寫入失敗或判定為略過的檔案不搬。

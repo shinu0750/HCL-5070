@@ -101,6 +101,28 @@ def save_to_inputs(unid, name, data):
     return path, fname
 
 
+def _kill_container_process(fname):
+    """`subprocess.run(..., timeout=...)` 逾時只會砍掉 Windows 端這個 `wsl`/
+    `docker compose exec` client 本身——`docker exec` 沒有配 tty，client
+    斷線不會送 SIGHUP 進容器，容器裡實際在跑的 `process_pdf.py`/`mineru` 子行程
+    完全不受影響，會變成孤兒繼續佔用本機 LLM 後端的並發請求槽（實測
+    `-np 1`，只有一個槽，孤兒卡著會讓後續每一項都排隊變慢）。逾時後主動用
+    `pkill -f` 比對 fname（每個附件唯一，含 unid 前綴）清掉容器裡對應的行程；
+    fname 可能含 regex 特殊字元（括號、加號等），用 `re.escape()` 避免比對到
+    非預期的行程。清理本身失敗只印警告、不拋例外——逾時已經算失敗了，不該讓
+    清理動作的例外蓋掉呼叫端原本要回報的逾時錯誤。"""
+    pattern = re.escape(fname)
+    try:
+        subprocess.run(
+            ["wsl", "-d", "Ubuntu", "--", "docker", "compose", "-f", DOCKER_COMPOSE_FILE,
+             "exec", "-T", "raganything", "pkill", "-f", pattern],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"  ⚠️ 清理容器內逾時行程失敗（{fname[:50]}）：{e}")
+
+
 def upload_to_raganything(fname):
     """觸發 docker compose exec 處理 inputs 目錄裡的這個檔案，併入共用知識庫。
     回傳 (成功與否, stdout/stderr 摘要)。"""
@@ -115,7 +137,8 @@ def upload_to_raganything(fname):
         detail = (result.stdout or "")[-2000:] + (result.stderr or "")[-2000:]
         return ok, detail
     except subprocess.TimeoutExpired:
-        return False, f"process_pdf.py 逾時（>{PROCESS_TIMEOUT_SEC}s）"
+        _kill_container_process(fname)
+        return False, f"process_pdf.py 逾時（>{PROCESS_TIMEOUT_SEC}s），已清理容器內殘留行程"
     except Exception as e:
         return False, str(e)
 
