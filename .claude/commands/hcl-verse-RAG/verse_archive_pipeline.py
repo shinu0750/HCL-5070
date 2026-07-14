@@ -1404,7 +1404,7 @@ def main():
                     try:
                         mq_records = process_meeting_quote_attachments(
                             m["unid"], meta["subject"], m["sender_name"],
-                            m["sent_date"], attachments_data)
+                            m["sent_date"], attachments_data, body=m.get("body", ""))
                         for r in mq_records:
                             flag = "✓" if r["saved"] else "✗"
                             print(f"    {flag} 會議記錄/報價單附件[{','.join(r['labels'])}] {r['name'][:40]}"

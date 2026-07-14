@@ -48,10 +48,11 @@ MEETING_KEYWORDS = ["會議記錄", "會議紀錄", "會議紀要", "meeting min
 QUOTE_KEYWORDS = ["報價單", "報價", "quotation", "quote"]
 
 
-def classify_attachment(filename, subject):
+def classify_attachment(filename, subject, body=""):
     """回傳這個附件符合的類別集合：{"meeting"} / {"quote"} / 兩者皆有 / 空集合。
-    檔名或主旨任一邊符合關鍵字就算數（信件主旨當輔助訊號，擴大命中率）。"""
-    haystack = f"{filename or ''} {subject or ''}".lower()
+    檔名、主旨、內文任一邊符合關鍵字就算數（實測發現有些信件檔名/主旨都沒寫「報價單」
+    這種字眼，但內文明講「請查收附件本案報價單」——只看檔名/主旨會漏掉這種案例）。"""
+    haystack = f"{filename or ''} {subject or ''} {body or ''}".lower()
     labels = set()
     if any(kw.lower() in haystack for kw in MEETING_KEYWORDS):
         labels.add("meeting")
@@ -180,18 +181,20 @@ def write_meeting_to_hindsight(hindsight, unid, attachment_name, markdown_text,
     )
 
 
-def process_meeting_quote_attachments(unid, subject, sender_name, sent_date, attachments_data):
+def process_meeting_quote_attachments(unid, subject, sender_name, sent_date, attachments_data, body=""):
     """attachments_data: [(name, bytes), ...]（來自 download_attachments()）。
     只挑 .pdf、且符合會議記錄/報價單關鍵字的附件，另存到 MEETING_QUOTE_STAGING_DIR
     （見檔案開頭兩階段說明），不觸發 RAGAnything/Hindsight——那是
     meeting_quote_batch_process.py 事後才做的事，這裡只要快、不能拖慢歸檔本身。
+    `body` 是信件內文（選填，供 classify_attachment() 擴大關鍵字比對範圍用，見該函式
+    說明），呼叫端沒帶就退化成只看檔名/主旨，跟改動前行為一致。
     回傳每個候選附件的存檔紀錄，供呼叫端 print/記錄用，不影響信件本身的
     RAG/Hindsight/EML/搬移流程——這一段失敗只印警告，不拋例外中斷主流程。"""
     records = []
     for name, data in attachments_data or []:
         if not name.lower().endswith(".pdf"):
             continue
-        labels = classify_attachment(name, subject)
+        labels = classify_attachment(name, subject, body)
         if not labels:
             continue
 
