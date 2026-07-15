@@ -127,25 +127,25 @@
     "seen_names": [
       "大中機械設計部"
     ],
-    "count": 7,
+    "count": 11,
     "first_seen": "2026-06-25 15:12",
-    "last_seen": "2026-07-14 09:38",
+    "last_seen": "2026-07-14 19:37",
     "confirmed": false
   },
   "catherinel@cicorp.com.tw": {
     "seen_names": [
       "'CIC/Catherine Li'"
     ],
-    "count": 21,
+    "count": 32,
     "first_seen": "2026-03-02 18:35",
-    "last_seen": "2026-07-14 09:52",
+    "last_seen": "2026-07-15 11:06",
     "confirmed": false
   },
   "paogan5@gmail.com": {
     "seen_names": [
       "PAOGAN保樫工業"
     ],
-    "count": 7,
+    "count": 14,
     "first_seen": "2026-05-29 08:49",
     "last_seen": "2026-07-08 15:02",
     "confirmed": false
@@ -154,9 +154,9 @@
     "seen_names": [
       "'CIC-Eric'"
     ],
-    "count": 8,
+    "count": 14,
     "first_seen": "2026-05-28 09:56",
-    "last_seen": "2026-07-07 17:26",
+    "last_seen": "2026-07-15 11:06",
     "confirmed": false
   },
   "kunlin@jgok.net": {
@@ -189,9 +189,9 @@
     "seen_names": [
       "Miyanishi, Takashi"
     ],
-    "count": 18,
+    "count": 21,
     "first_seen": "2026-01-08 04:57",
-    "last_seen": "2026-07-02 11:35",
+    "last_seen": "2026-07-08 23:18",
     "confirmed": false
   },
   "houei.liu@msa.hinet.net": {
@@ -350,9 +350,9 @@
       "廖俊賢 專案經理",
       "'廖俊賢 Jason Liao'"
     ],
-    "count": 118,
+    "count": 132,
     "first_seen": "2026-01-07 15:04",
-    "last_seen": "2026-05-14 15:46",
+    "last_seen": "2026-07-15 08:56",
     "confirmed": false
   },
   "hoh.sin@msa.hinet.net": {
@@ -370,18 +370,18 @@
       "joannechen",
       "秘書部-陳秀娟"
     ],
-    "count": 95,
+    "count": 96,
     "first_seen": "2026-01-13 11:21",
-    "last_seen": "2026-05-11 15:42",
+    "last_seen": "2026-07-01 15:07",
     "confirmed": false
   },
   "pinchi@ecic.com.tw": {
     "seen_names": [
       "永光化學-王品淇"
     ],
-    "count": 74,
+    "count": 80,
     "first_seen": "2026-01-06 15:46",
-    "last_seen": "2026-05-11 15:42",
+    "last_seen": "2026-07-15 11:31",
     "confirmed": false
   },
   "jim@futai.com.tw": {
@@ -492,9 +492,9 @@
     "seen_names": [
       "rin, ritsu"
     ],
-    "count": 1,
+    "count": 3,
     "first_seen": "2026-04-15 15:20",
-    "last_seen": "2026-04-15 15:20",
+    "last_seen": "2026-07-08 23:18",
     "confirmed": false
   },
   "takumi_hatazoe@jsr.co.jp": {
@@ -519,9 +519,9 @@
     "seen_names": [
       "Andou, Daiki"
     ],
-    "count": 1,
+    "count": 3,
     "first_seen": "2026-04-15 15:20",
-    "last_seen": "2026-04-15 15:20",
+    "last_seen": "2026-07-08 23:18",
     "confirmed": false
   },
   "shunsuke_iizuka@jsr-em.com.tw": {
@@ -573,18 +573,18 @@
     "seen_names": [
       "Furuichi, Hiroki"
     ],
-    "count": 1,
+    "count": 3,
     "first_seen": "2026-04-15 15:20",
-    "last_seen": "2026-04-15 15:20",
+    "last_seen": "2026-06-26 17:34",
     "confirmed": false
   },
   "shingo_uchida@jsr.co.jp": {
     "seen_names": [
       "Uchida, Shingo"
     ],
-    "count": 1,
+    "count": 3,
     "first_seen": "2026-04-15 15:20",
-    "last_seen": "2026-04-15 15:20",
+    "last_seen": "2026-07-08 23:18",
     "confirmed": false
   },
   "daiki_katou@jsr.co.jp": {
@@ -636,9 +636,9 @@
     "seen_names": [
       "Sugie, Norihiko"
     ],
-    "count": 1,
+    "count": 3,
     "first_seen": "2026-04-15 15:20",
-    "last_seen": "2026-04-15 15:20",
+    "last_seen": "2026-07-08 23:18",
     "confirmed": false
   },
   "yukiko_hashida@jsr.co.jp": {
@@ -654,9 +654,9 @@
     "seen_names": [
       "Shouji, Takuou"
     ],
-    "count": 1,
+    "count": 3,
     "first_seen": "2026-04-15 15:20",
-    "last_seen": "2026-04-15 15:20",
+    "last_seen": "2026-07-08 23:18",
     "confirmed": false
   },
   "atsushi_itou@jsr.co.jp": {
@@ -786,6 +786,784 @@
     "count": 29,
     "first_seen": "2025-12-26 11:23",
     "last_seen": "2026-02-10 10:31",
+    "confirmed": false
+  },
+  "deanluo@micb2b.com": {
+    "seen_names": [
+      "Dean Luo 羅文皓"
+    ],
+    "count": 10,
+    "first_seen": "2026-06-26 16:40",
+    "last_seen": "2026-07-15 00:43",
+    "confirmed": false
+  },
+  "mascotfang@micb2b.com": {
+    "seen_names": [
+      "Mascot Fang 范綱湧"
+    ],
+    "count": 8,
+    "first_seen": "2026-06-26 16:40",
+    "last_seen": "2026-07-15 00:43",
+    "confirmed": false
+  },
+  "ivylin1@micb2b.com": {
+    "seen_names": [
+      "Ivy Lin 林梓茵"
+    ],
+    "count": 6,
+    "first_seen": "2026-06-26 16:40",
+    "last_seen": "2026-07-15 00:43",
+    "confirmed": false
+  },
+  "angelatang@micb2b.com": {
+    "seen_names": [
+      "Angela Tang 湯雅淳"
+    ],
+    "count": 6,
+    "first_seen": "2026-06-26 16:40",
+    "last_seen": "2026-07-15 00:43",
+    "confirmed": false
+  },
+  "jessie.zhang@moxa.com": {
+    "seen_names": [
+      "Jessie Zhang 張杰"
+    ],
+    "count": 3,
+    "first_seen": "2026-07-13 16:13",
+    "last_seen": "2026-07-14 10:19",
+    "confirmed": false
+  },
+  "weihao.huang@rockwellautomation.com": {
+    "seen_names": [
+      "Eric Huang"
+    ],
+    "count": 32,
+    "first_seen": "2026-07-01 15:35",
+    "last_seen": "2026-07-14 11:34",
+    "confirmed": false
+  },
+  "dennis.lin@yokogawa.com": {
+    "seen_names": [],
+    "count": 5,
+    "first_seen": "2026-07-07 10:16",
+    "last_seen": "2026-07-13 15:53",
+    "confirmed": false
+  },
+  "enya.lin@yokogawa.com": {
+    "seen_names": [],
+    "count": 5,
+    "first_seen": "2026-07-07 10:16",
+    "last_seen": "2026-07-13 15:53",
+    "confirmed": false
+  },
+  "oakley.wu@yokogawa.com": {
+    "seen_names": [],
+    "count": 6,
+    "first_seen": "2026-07-01 09:19",
+    "last_seen": "2026-07-13 15:53",
+    "confirmed": false
+  },
+  "avon@bythontech.com": {
+    "seen_names": [
+      "Avon Cheng"
+    ],
+    "count": 5,
+    "first_seen": "2026-07-01 14:53",
+    "last_seen": "2026-07-13 09:58",
+    "confirmed": false
+  },
+  "hr@ecic.com.tw": {
+    "seen_names": [
+      "HR"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 08:42",
+    "last_seen": "2026-07-15 09:13",
+    "confirmed": false
+  },
+  "chihchunhsu@micb2b.com": {
+    "seen_names": [
+      "Chihchun Hsu 許智鈞"
+    ],
+    "count": 7,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "cindytsai@micb2b.com": {
+    "seen_names": [
+      "Cindy Tsai 蔡馨儀"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "elvanchen@micb2b.com": {
+    "seen_names": [
+      "Elvan Chen 陳奕銘"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "ericho@micb2b.com": {
+    "seen_names": [
+      "Eric Ho 何正邦"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "jasonwu@micb2b.com": {
+    "seen_names": [
+      "Jason Wu 吳俊逸"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "ricolo@micb2b.com": {
+    "seen_names": [
+      "Rico Lo 羅思源"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "wiseni@micb2b.com": {
+    "seen_names": [
+      "Wise Ni 倪啟修"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "willyho@micb2b.com": {
+    "seen_names": [
+      "Willy Ho 何御瑋"
+    ],
+    "count": 13,
+    "first_seen": "2026-06-30 11:09",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "dickchang@micb2b.com": {
+    "seen_names": [
+      "Dick Chang 張光華"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-03 06:44",
+    "last_seen": "2026-07-12 23:19",
+    "confirmed": false
+  },
+  "clairelin1@micb2b.com": {
+    "seen_names": [
+      "Claire Lin 林淑靜"
+    ],
+    "count": 6,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-15 11:31",
+    "confirmed": false
+  },
+  "safin.feng@micb2b.com": {
+    "seen_names": [],
+    "count": 6,
+    "first_seen": "2026-07-05 12:11",
+    "last_seen": "2026-07-13 10:31",
+    "confirmed": false
+  },
+  "daisen_takahashi@jsrgr.com": {
+    "seen_names": [
+      "Takahashi, Daisen"
+    ],
+    "count": 3,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "akio_taira@jsrgr.com": {
+    "seen_names": [
+      "Taira, Akio"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "jin_odahara@jsrgr.com": {
+    "seen_names": [
+      "Odahara, Jin"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "tomohiro_kakizawa@jsrgr.com": {
+    "seen_names": [
+      "Kakizawa, Tomohiro"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "takuo_shoji@jsrgr.com": {
+    "seen_names": [
+      "Shouji, Takuou"
+    ],
+    "count": 4,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "kentaro_tamaki@jsrgr.com": {
+    "seen_names": [
+      "Tamaki, Kentaro"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "daita_kono@jsrgr.com": {
+    "seen_names": [
+      "Kouno, Daita"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "yuichiro_arimura@jsrgr.com": {
+    "seen_names": [
+      "Arimura, Yuuichirou"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "tomoya_shimura@jsrgr.com": {
+    "seen_names": [
+      "Shimura, Tomoya"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 18:38",
+    "last_seen": "2026-07-14 14:40",
+    "confirmed": false
+  },
+  "leo@teema.org.tw": {
+    "seen_names": [
+      "鄭長霖"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-09 17:11",
+    "last_seen": "2026-07-09 17:11",
+    "confirmed": false
+  },
+  "noreply@moxa.com": {
+    "seen_names": [
+      "Moxa Global"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-09 15:37",
+    "last_seen": "2026-07-09 15:37",
+    "confirmed": false
+  },
+  "daisen_takahashi@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "fumihiro_suzuki@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "kenji_ishizuki@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "kentarou_tamaki@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "kouji_itou@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "masashi_iwasaki@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "michihiro_chihara@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "tomoya_shimura@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "yoshito_itou@jsr.co.jp": {
+    "seen_names": [],
+    "count": 2,
+    "first_seen": "2026-07-01 22:49",
+    "last_seen": "2026-07-08 23:18",
+    "confirmed": false
+  },
+  "lukas.lai@otobro.com": {
+    "seen_names": [
+      "Lukas"
+    ],
+    "count": 2,
+    "first_seen": "2026-06-29 14:26",
+    "last_seen": "2026-07-14 10:34",
+    "confirmed": false
+  },
+  "allen.chu@otobro.com": {
+    "seen_names": [
+      "Allen Chu"
+    ],
+    "count": 2,
+    "first_seen": "2026-06-29 14:26",
+    "last_seen": "2026-07-14 10:34",
+    "confirmed": false
+  },
+  "royce.huang@otobro.com": {
+    "seen_names": [
+      "Huang Royce"
+    ],
+    "count": 2,
+    "first_seen": "2026-06-29 14:26",
+    "last_seen": "2026-07-14 10:34",
+    "confirmed": false
+  },
+  "jax.chen@otobro.com": {
+    "seen_names": [
+      "Chen Jax"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-14 10:34",
+    "last_seen": "2026-07-14 10:34",
+    "confirmed": false
+  },
+  "info@keyence.com.tw": {
+    "seen_names": [
+      "洪胤祐 Luke.Hong"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-07 14:04",
+    "last_seen": "2026-07-07 14:04",
+    "confirmed": false
+  },
+  "forlearn@tti-toner.com": {
+    "seen_names": [],
+    "count": 1,
+    "first_seen": "2026-07-07 13:12",
+    "last_seen": "2026-07-07 13:12",
+    "confirmed": false
+  },
+  "ipoasd25@ecic.com.cn": {
+    "seen_names": [],
+    "count": 1,
+    "first_seen": "2026-07-07 13:12",
+    "last_seen": "2026-07-07 13:12",
+    "confirmed": false
+  },
+  "salesmttw@mt-tw.com": {
+    "seen_names": [
+      "瑞士商梅特勒托利多"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-07 11:53",
+    "last_seen": "2026-07-07 11:53",
+    "confirmed": false
+  },
+  "candychiu@micb2b.com": {
+    "seen_names": [
+      "Candy Chiu 邱芠茹"
+    ],
+    "count": 5,
+    "first_seen": "2026-06-26 16:40",
+    "last_seen": "2026-07-13 15:11",
+    "confirmed": false
+  },
+  "bobhsu@micb2b.com": {
+    "seen_names": [
+      "Bob Hsu 徐明亮"
+    ],
+    "count": 3,
+    "first_seen": "2026-06-26 16:40",
+    "last_seen": "2026-07-13 15:11",
+    "confirmed": false
+  },
+  "sns@synologynotification.com": {
+    "seen_names": [
+      "Synology Notification System"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-02 23:21",
+    "last_seen": "2026-07-02 23:21",
+    "confirmed": false
+  },
+  "barry.wu@topco-global.com": {
+    "seen_names": [],
+    "count": 1,
+    "first_seen": "2026-07-15 13:12",
+    "last_seen": "2026-07-15 13:12",
+    "confirmed": false
+  },
+  "ritsu_rin@jsrgr.com": {
+    "seen_names": [
+      "rin, ritsu"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "nobuo_ogura@jsrgr.com": {
+    "seen_names": [
+      "Ogura, Nobuo"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "kazuhito_uchikura@jsrgr.com": {
+    "seen_names": [
+      "Uchikura, Kazuhito"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "rikimaru_kuwabara@jsrgr.com": {
+    "seen_names": [
+      "Kuwabara, Rikimaru"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "naota_torii@jsrgr.com": {
+    "seen_names": [
+      "Torii, Naota"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "takumi_hatazoe@jsrgr.com": {
+    "seen_names": [
+      "Hatazoe, Takumi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "toshimi_hirano@jsrgr.com": {
+    "seen_names": [
+      "Hirano, Toshimi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "daiki_ando@jsrgr.com": {
+    "seen_names": [
+      "Andou, Daiki"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "shunsuke_iizuka@jsrgr.com": {
+    "seen_names": [
+      "Iizuka, Shunsuke"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "yuichi_yashiro@jsrgr.com": {
+    "seen_names": [
+      "Yashiro, Yuuichi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "koji_takekawa@jsrgr.com": {
+    "seen_names": [
+      "Takekawa, Kouji"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "fiona_huang@jsrgr.com": {
+    "seen_names": [
+      "Huang, Fiona"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "atsushi_baba@jsrgr.com": {
+    "seen_names": [
+      "Baba, Atsushi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "hiroki_furuichi@jsrgr.com": {
+    "seen_names": [
+      "Furuichi, Hiroki"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "shingo_uchida@jsrgr.com": {
+    "seen_names": [
+      "Uchida, Shingo"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "daiki_kato@jsrgr.com": {
+    "seen_names": [
+      "Katou, Daiki"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "naoyuki_kawashima@jsrgr.com": {
+    "seen_names": [
+      "Kawashima, Naoyuki"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "makoto_katsurayama@jsrgr.com": {
+    "seen_names": [
+      "Katsurayama, Makoto"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "akira_taniguchi@jsrgr.com": {
+    "seen_names": [
+      "Taniguchi, Akira"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "norihiko_sugie@jsrgr.com": {
+    "seen_names": [
+      "Sugie, Norihiko"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "yukiko_hashida@jsrgr.com": {
+    "seen_names": [
+      "Hashida, Yukiko"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "atsushi_ito@jsrgr.com": {
+    "seen_names": [
+      "Itou, Atsushi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "takashi_miyanishi@jsrgr.com": {
+    "seen_names": [
+      "Miyanishi, Takashi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "abby_chen@jsrgr.com": {
+    "seen_names": [
+      "Chen, Abby"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "john_su@jsrgr.com": {
+    "seen_names": [
+      "Su, John"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "yukiyoshi_tsuchiya@jsrgr.com": {
+    "seen_names": [
+      "Tsuchiya, Yukiyoshi"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-15 11:37",
+    "last_seen": "2026-07-15 12:29",
+    "confirmed": false
+  },
+  "eason_hsieh@asgard.com.tw": {
+    "seen_names": [
+      "謝易澄(Eason Hsieh)"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-01 15:46",
+    "last_seen": "2026-07-01 15:46",
+    "confirmed": false
+  },
+  "alan_chaung@asgard.com.tw": {
+    "seen_names": [
+      "莊培廉(Alan Chaung)"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-01 15:46",
+    "last_seen": "2026-07-01 15:46",
+    "confirmed": false
+  },
+  "stanley_shih@asgard.com.tw": {
+    "seen_names": [
+      "施勝榮(Stanley Shih)"
+    ],
+    "count": 1,
+    "first_seen": "2026-07-01 15:46",
+    "last_seen": "2026-07-01 15:46",
+    "confirmed": false
+  },
+  "elearning@ecic.com.t": {
+    "seen_names": [
+      "i-學習(eHRD訓練系統)"
+    ],
+    "count": 2,
+    "first_seen": "2026-07-01 10:50",
+    "last_seen": "2026-07-01 10:55",
+    "confirmed": false
+  },
+  "rockey_yang@jet-tech.com.tw": {
+    "seen_names": [
+      "勁傑-楊鈞翰"
+    ],
+    "count": 1,
+    "first_seen": "2026-06-30 20:40",
+    "last_seen": "2026-06-30 20:40",
+    "confirmed": false
+  },
+  "tina@jet-tech.com.tw": {
+    "seen_names": [
+      "Tina JetTech"
+    ],
+    "count": 1,
+    "first_seen": "2026-06-30 20:40",
+    "last_seen": "2026-06-30 20:40",
+    "confirmed": false
+  },
+  "donotreply@manageengine.com": {
+    "seen_names": [
+      "donotreply"
+    ],
+    "count": 1,
+    "first_seen": "2026-06-30 15:43",
+    "last_seen": "2026-06-30 15:43",
+    "confirmed": false
+  },
+  "martin.lin@otobro.com": {
+    "seen_names": [
+      "Lin Martin"
+    ],
+    "count": 1,
+    "first_seen": "2026-06-29 14:26",
+    "last_seen": "2026-06-29 14:26",
+    "confirmed": false
+  },
+  "sena_chen@jsr-em.com.tw": {
+    "seen_names": [
+      "Chen, Sena"
+    ],
+    "count": 3,
+    "first_seen": "2026-06-26 17:04",
+    "last_seen": "2026-06-26 17:34",
+    "confirmed": false
+  },
+  "erin_yu@jsr-em.com.tw": {
+    "seen_names": [
+      "Yu, Erin"
+    ],
+    "count": 2,
+    "first_seen": "2026-06-26 17:04",
+    "last_seen": "2026-06-26 17:34",
     "confirmed": false
   }
 }
