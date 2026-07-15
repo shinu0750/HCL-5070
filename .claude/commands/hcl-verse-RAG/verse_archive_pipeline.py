@@ -911,6 +911,17 @@ def open_row_and_get_block_unids(page, row_locator):
         n = page.evaluate(
             "() => document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]').length"
         )
+
+        if n == 0 and captured:
+            # 實測發現：部分沒有 Count 分組的單則郵件，`.pim-mailread-container`
+            # 完全不會渲染 `aria-expanded` 屬性（跟有分組討論串的訊息不同），導致這裡
+            # 靠這個屬性數區塊數量抓到 0——但 click() 當下其實正常打出了 OpenDocument
+            # 請求（訊息本身有正常開啟閱讀，只是沒有 aria-expanded 可以配對），若直接
+            # 回傳空陣列，main() 會誤判成「一則都沒抓到」退回 make_id() 的雜湊備援 id，
+            # 白白丟失已經攔截到的真正 Domino UNID（後續附件比對/dedup/跨帳號比對都
+            # 會失真）。這種情況直接把攔截到的請求當成唯一一則訊息的 UNID。
+            return [captured[-1]], 1
+
         block_unid = [None] * n
 
         # 一進來就展開的那則（通常是最新一則），它的 OpenDocument 請求在 click() 時就打了
@@ -945,9 +956,19 @@ def open_row_and_get_block_unids(page, row_locator):
 
 def extract_message_block(page, idx):
     """抓第 idx 則訊息（`.preview-container .pim-mailread-container[aria-expanded]` 的第 idx
-    個元素）自己的 sender/date/to/cc/bcc/body，跟其他訊息的內容互不干擾。"""
+    個元素）自己的 sender/date/to/cc/bcc/body，跟其他訊息的內容互不干擾。
+
+    實測發現：部分沒有 Count 分組的單則郵件，`.pim-mailread-container` 完全不會渲染
+    `aria-expanded` 屬性（見 `open_row_and_get_block_unids()` 同樣的 n==0 備援說明）——
+    這裡如果一樣只用 `[aria-expanded]` 篩選，會找不到任何區塊而回傳 None，導致 main()
+    判定「一則都沒抓到」整個退回 make_id() 雜湊備援 id，把 open_row_and_get_block_unids()
+    已經正確攔截到的真正 Domino UNID 整個浪費掉（body/寄件人等內容其實讀得到，只是
+    選不到元素）。篩選不到才退回不限定 aria-expanded 的寬鬆版選擇器。"""
     return page.evaluate(r"""(i) => {
-        const blocks = [...document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]')];
+        let blocks = [...document.querySelectorAll('.preview-container .pim-mailread-container[aria-expanded]')];
+        if (blocks.length === 0) {
+            blocks = [...document.querySelectorAll('.preview-container .pim-mailread-container')];
+        }
         const b = blocks[i];
         if (!b) return null;
         const dateEl = b.querySelector('.pim-mailread-sentdate');
@@ -1315,6 +1336,14 @@ def main():
                 # 點開 + 展開全部訊息 + 攔截每則的 Domino UNID
                 block_unids, n_blocks = open_row_and_get_block_unids(page, item)
 
+                # 附件連結要在這裡立刻抓（展開完成的當下），不能拖到訊息迴圈跑完之後
+                # 才抓——訊息迴圈裡的 resolve_unresolved_canonicals() 會打 iNotes 姓名
+                # 驗證 API，這類額外的 DOM/網路互動會讓已展開過的訊息區塊把暫存在 DOM
+                # 裡的附件連結洗掉，導致收尾時 get_attachment_links() 抓到空清單（實測
+                # 重現：展開完立刻抓有附件連結，訊息迴圈跑完後才抓變成 0 個）。
+                att_links = get_attachment_links(page)
+                cookies   = {c['name']: c['value'] for c in page.context.cookies()}
+
                 # 整串（thread 級）header/raw，給 EML 完整存檔用（不截斷）
                 thread_header = extract_header_fields(page)
                 thread_raw    = page.locator('.preview-container').inner_text().strip()
@@ -1417,8 +1446,7 @@ def main():
                 # 下載每則訊息自己的附件、另存一份到 ATTACHMENTS_DIR（跟 .eml 分開存，
                 # 檔名前綴 unid 避免同名衝突）。要在 RAG 那步之前做，才能把存檔位置寫進
                 # Qdrant payload；同一份 bytes 留給下面 EML 打包用，不用重複下載。
-                att_links = get_attachment_links(page)
-                cookies   = {c['name']: c['value'] for c in page.context.cookies()}
+                # （att_links/cookies 已經在展開完成當下抓好，見上方說明，這裡不重抓）
                 for m in messages:
                     # 這個 UNID 的 .eml 已經在 Done——但 Done 是所有帳號共用的單一池，
                     # 不代表「這次登入的帳號」自己的 Gmail 已經有這封信（3.19.0 曾經誤判
