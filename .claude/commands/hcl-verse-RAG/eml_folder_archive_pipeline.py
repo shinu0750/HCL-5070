@@ -526,7 +526,7 @@ def main():
                     document_id=doc_id,
                     timestamp=parsed["sent_date"],
                     metadata=metadata,
-                    tags=(["mail", f"proj:{PROJ_TAG}"] if PROJ_TAG else ["mail"]),
+                    tags=(["mail", PROJ_TAG] if PROJ_TAG else ["mail"]),
                     context=f"信件：主旨「{subject}」，寄件者 {from_name}",
                 )
                 result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")

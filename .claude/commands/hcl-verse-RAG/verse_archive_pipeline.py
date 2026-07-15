@@ -1259,7 +1259,7 @@ def main():
             print("登入 HCL Verse...")
             login(page)
             if PROJ_TAG:
-                print(f"（本次會額外標記 Hindsight tag：proj:{PROJ_TAG}）")
+                print(f"（本次會額外標記 Hindsight tag：{PROJ_TAG}）")
             print(f"開啟資料夾「{SOURCE_FOLDER}」...")
             open_folder(page, SOURCE_FOLDER)
             ensure_thread_grouping_off(page)
@@ -1503,7 +1503,7 @@ def main():
                             # 是為了讓 reflect()/recall() 能用 tags=["mail"] 過濾，
                             # 避免跟同一個 EID bank 裡其他 skill 寫入的資料（例如
                             # hcl-notes-approval 的簽核記錄）混在一起污染查詢結果
-                            tags=(["mail", f"proj:{PROJ_TAG}"] if PROJ_TAG else ["mail"]),
+                            tags=(["mail", PROJ_TAG] if PROJ_TAG else ["mail"]),
                             context=f"HCL Verse 信件：主旨「{meta['subject']}」，寄件者 {m['sender_name']}",
                         )
                         result_text = result.get("result", {}).get("content", [{}])[0].get("text", "")
