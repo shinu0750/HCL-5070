@@ -5,7 +5,7 @@ description: >
   外出單簽核、加班申請、未刷卡單、待簽核、幫我簽核時使用此 skill。
   此 skill 透過 Playwright 掃描 HCL Verse 收件匣找出待簽核表單，
   再透過 Android 模擬器（ADB）操作 HCL Nomad app 截圖、驗證欄位後核准。
-version: 2.13.1
+version: 2.14.0
 ---
 
 # HCL Notes 表單簽核自動化（Android 版）
@@ -22,6 +22,34 @@ version: 2.13.1
 - **環境變數**：`~/.hermes/.env`（含 HCL_USERNAME、HCL_PASSWORD、HCL_PORTAL_URL、HCL_VERSE_URL、HCL_NOTES_PASSWORD）
 - **Hindsight**（Phase 4 用）：自架服務，Windows 端連 `http://localhost:8888`（API）/
   `http://localhost:9999`（Dashboard），無需登入驗證，不需要 MCP server
+
+### Nomad App 顯示縮放設定（一次性，大幅減少截圖張數與驗證 token）
+
+2026-07-22 發現：HCL Nomad app 本身有內建的顯示縮放設定，跟 Android 系統的字體大小／
+螢幕密度（`font_scale`／`wm density`）完全無關，改那兩個系統設定不會有效果。設定路徑：
+
+```
+Nomad 首頁 → 左上角選單 → Settings → App size → 選「最小（Smallest）」
+```
+
+這是 Nomad 每次安裝各自持久保存的設定，**不是每次執行前都要重設**——比照「Execution
+Security Alert 每個 agent 簽章只需要處理一次」的一次性設定模式。但因為是每個 Nomad
+安裝各自獨立保存，**每台模擬器／每個帳號都要各自進去設定一次**（ShuHsing／tzuyu／ycmu
+三台都要分別設）。
+
+**影響**：設定前，外出單/加班單/未刷卡單三種表單都要捲動 4~7 頁才能涵蓋六個驗證欄位
+（姓名/類型/日期/時間/事由/狀態）——Nomad 預設字級偏大，前 1~2 頁通常只看得到姓名/狀態/
+部門，日期/時間要再往下滑，捲到底還會多截到「主管核定事項」之類驗證用不到的簽核歷程
+頁面。設定成「最小」後，2026-07-22 對三種表單類型實測，六個欄位全部擠進第一屏，
+**不需要再往下滑動**。
+
+也就是說 Phase 2a 每封信的截圖張數可以從 4~7 張降到 1 張，Claude 讀圖驗證的 token 消耗
+也差不多是同比例下降（每張 2400×1080 全螢幕截圖依 Claude 圖片計價公式約 1,200~1,600
+token；14 封信一輪跑下來 60 幾張截圖疊起來，是這個 skill 單次執行 token 消耗的大頭）。
+
+> 若某台裝置忘記設定這個選項，`capture_full_form()` 仍會照舊行為捲動到底補齊所有頁面，
+> **不會因為沒設定而漏欄位**——這只是效率最佳化，不是正確性前提。但沒設定的話，Claude
+> 讀圖驗證那步會照舊把 4~7 張截圖都讀進去，token 省不下來。
 
 ### 代簽別人帳號（多使用者）
 
@@ -102,6 +130,9 @@ python hcl_write_hindsight.py --notify-only --notify-file "$TEMP/hcl_password_al
 - ycmu 是剛準備好的新 AVD，第一次執行 Phase 2a/2b 很可能會遇到「技術注意事項」章節
   提到的 Execution Security Alert 對話框（每個 agent 簽章只需處理一次），照該章節的
   步驟放行即可，不是異常
+- 新裝置或還沒確認過的裝置，執行前可以先檢查一下 Nomad 的 Settings → App size 是否
+  已經設成「最小」（見上面「Nomad App 顯示縮放設定」）——沒設不影響正確性，但截圖
+  驗證會多讀好幾張圖，白白多花 token
 
 ---
 
@@ -164,6 +195,11 @@ python hcl_approve_android.py --screenshot-only
 
 對每封信件讀取截圖，驗證是否包含以下六個欄位：
 - **姓名**、**類型**（外出申請 / 加班申請 / 未刷卡申請 / 外出單通知）、**日期**、**時間**、**事由**、**狀態**（畫面上「狀態：」後面的文字，例如「簽核中」「簽核完成」）
+
+> **先讀第一張（page a）就好**：設定過上面「Nomad App 顯示縮放設定」的裝置，六個欄位
+> 通常第一張截圖就齊全，不需要把 `hcl_screenshots.json` 裡列出的每一張都讀完——那些
+> 後面的頁面多半是「主管核定事項」等簽核歷程，驗證用不到，白讀只會多花 token。只有第
+> 一張欄位真的不齊全時，才需要繼續讀第二張、第三張，或走下面的 retry 流程。
 
 | 驗證結果 | 動作 |
 |---------|------|
@@ -452,6 +488,29 @@ Alert」的訊號，不是欄位真的缺失。
 
 ## Changelog
 
+- 2.14.0 (2026-07-22): 發現 Nomad「App size」顯示縮放設定可大幅減少截圖張數，追查 token 消耗過高的根因
+  - **起因**：使用者發現這個 skill 單次執行會燒掉大量 token，要求追查原因。分析當天
+    一輪 14 封信的執行紀錄（`hcl_screenshots.json`），發現總共產生 64 張 2400×1080 全
+    螢幕截圖（每封信 4~7 張），Claude 截圖驗證步驟會把全部 64 張都讀進去——這是單次
+    執行 token 消耗的大頭。實際比對截圖內容發現，六個驗證欄位一定落在最前面 1~2 頁，
+    後面 2~5 頁全部是「主管核定事項」等簽核歷程，驗證用不到，等於有一半以上的截圖是
+    白讀的
+  - 追查過程中一併確認了兩個非主因、順手記錄的觀察：`hcl_screenshots.json` 裡兩筆不同
+    人的表單 `page1_hash` 完全相同（可能是 Nomad 畫面切換殘留，屬於 2.10.0 系列已知同
+    類問題的變體，尚未進一步處理）；螢幕解析度 2400×1080 是 ShuHsing 模擬器 Pixel 7
+    裝置設定檔（`hw.lcd.width/height=1080/2400`，420dpi）的原生規格，非腳本自選
+  - 使用者接著在 Nomad app 內找到解法：**Nomad 首頁 → 左上角選單 → Settings → App
+    size → 選「最小（Smallest）」**。這是 Nomad app 自己的顯示縮放設定，跟 Android
+    系統的 `font_scale`／`wm density` 無關（實測改那兩個系統設定沒有效果）。設定後
+    2026-07-22 對外出單、加班單、未刷卡單三種表單類型分別實測，六個欄位全部擠進第一屏，
+    不再需要往下滑動
+  - 新增「Nomad App 顯示縮放設定」章節（放在「必要環境」下），記錄設定路徑、影響範圍、
+    「每台裝置要各自設定一次、但不用每次執行都重設」的一次性設定模式；「Claude 截圖
+    驗證」段落加註：設定過此選項的裝置只需讀第一張截圖即可，不用把 `hcl_screenshots.json`
+    列出的每張都讀完；「使用方式」補上新裝置執行前可先檢查這個設定的提醒
+  - 沒有動 `capture_full_form()` 的截圖邏輯本身（它仍會捲到底作為保險），這次只更新
+    了「Claude 要讀幾張截圖」這個 skill 層驗證步驟的行為，不影響任何既有的按鈕座標
+    或核准/離開邏輯
 - 2.13.1 (2026-07-09): n8n webhook 主機位址變更（10.11.1.59 → 10.11.1.40）
   - `hcl_write_hindsight.py` 的 `N8N_NOTIFY_WEBHOOK` 常數與本文件的 POST 範例位址同步更新，
     webhook path（`hcl-approval-notify`）與 payload 格式不變
