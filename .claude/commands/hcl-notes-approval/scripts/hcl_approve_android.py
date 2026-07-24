@@ -52,23 +52,41 @@ class FormOpenError(RuntimeError):
 
 
 # ── 固定座標（橫向 2400×1080）──────────────────────────────────────────────────
+# 2026-07-24：Nomad「App size → 最小」設定套用後，工具列與系統對話框位置整體
+# 內縮，下面 Nomad 相關座標（comments_ok/delivery_ok/nomad_leave_fb/
+# nomad_approve_fb 與 FORM_BUTTONS）已改成新版位置。main_mail/hamburger/
+# menu_folders/folder_unsigned/attach_icon 屬於 Verse（com.lotus.sync.traveler）
+# 的座標，跟 Nomad 的顯示設定無關，不受影響、維持原值。
+# 三台模擬器（ShuHsing/tzuyu/ycmu）已在 2026-07-24 統一套用「App size → 最小」
+# 設定，這組新座標對三台都適用。外出單/加班申請那組已用 tzuyu 裝置實測核准
+# 成功；未刷卡那組只有 bounds 量測、未實際點過驗證，遇到未刷卡表單建議留意
+# 核准結果。若之後任何一台裝置的 App size 設定被改回預設值，該裝置要改用
+# FORM_BUTTONS 下方註解保留的舊座標，不能直接套用這組新值。
 COORD = {
     "main_mail":        (1268, 275),
     "hamburger":        (198,  115),
     "menu_folders":     (330,  846),
     "folder_unsigned":  (1326, 757),
     "attach_icon":      (415,  700),
-    "comments_ok":      (1604, 753),
-    "delivery_ok":      (1871, 660),
-    "nomad_leave_fb":   (243,  252),
-    "nomad_approve_fb": (447,  252),
+    "comments_ok":      (1463, 725),
+    "delivery_ok":      (1889, 682),
+    "nomad_leave_fb":   (214,  212),
+    "nomad_approve_fb": (362,  212),
 }
 
-# ── 各表單類型預設按鈕座標（y=252 固定，x 因按鈕文字寬度不同）──────────────────
+# ── 各表單類型預設按鈕座標（y=212 固定，x 因按鈕文字寬度不同）──────────────────
+# 外出單/加班申請、未刷卡兩組座標都已在 2026-07-24 用 tzuyu 裝置實測核准成功
+# （畫面顯示「遞送完成，目前等待黃樹瑆簽核中」，簽核鏈正確往下一關推進；未刷卡
+# 那筆同時在 Approval History 看到新增一筆「送出」紀錄）。加班申請沿用外出單
+# 同一組座標（工具列版面相同），未單獨實測，但風險低。
+#
+# 舊座標（App size 為預設值時，2026-07-24 前使用）供回復設定時參考：
+#   加班申請 / 外出單: {"leave": (243, 252), "approve": (447, 252)}
+#   未刷卡:           {"leave": (289, 252), "approve": (538, 252)}
 FORM_BUTTONS = {
-    "加班申請": {"leave": (243, 252), "approve": (447, 252)},
-    "外出單":   {"leave": (243, 252), "approve": (447, 252)},
-    "未刷卡":   {"leave": (289, 252), "approve": (538, 252)},
+    "加班申請": {"leave": (214, 212), "approve": (362, 212)},
+    "外出單":   {"leave": (214, 212), "approve": (362, 212)},
+    "未刷卡":   {"leave": (248, 212), "approve": (430, 212)},
 }
 
 KEYCODE_BACK = 4
